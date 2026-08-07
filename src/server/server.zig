@@ -18,22 +18,26 @@ const tools_mod = @import("tools.zig");
 const HttpRequestTransport = struct {
     response_message: ?[]const u8 = null,
     is_closed: bool = false,
+    // Must outlive the per-message arena that handleMessage() passes to send();
+    // using that arena's allocator here would free response_message before
+    // handleHttpJsonRpcRequest reads it back (use-after-free).
+    persistent_allocator: std.mem.Allocator = undefined,
 
     const Self = @This();
 
-    pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *Self, _: std.mem.Allocator) void {
         if (self.response_message) |msg| {
-            allocator.free(msg);
+            self.persistent_allocator.free(msg);
             self.response_message = null;
         }
     }
 
-    pub fn send(self: *Self, _: std.Io, allocator: std.mem.Allocator, message: []const u8) transport_mod.Transport.SendError!void {
+    pub fn send(self: *Self, _: std.Io, _: std.mem.Allocator, message: []const u8) transport_mod.Transport.SendError!void {
         if (self.is_closed) return transport_mod.Transport.SendError.ConnectionClosed;
 
-        const owned = allocator.dupe(u8, message) catch return transport_mod.Transport.SendError.OutOfMemory;
+        const owned = self.persistent_allocator.dupe(u8, message) catch return transport_mod.Transport.SendError.OutOfMemory;
         if (self.response_message) |old| {
-            allocator.free(old);
+            self.persistent_allocator.free(old);
         }
         self.response_message = owned;
     }
@@ -358,7 +362,7 @@ pub const Server = struct {
         };
         defer allocator.free(body_items);
 
-        var request_transport: HttpRequestTransport = .{};
+        var request_transport: HttpRequestTransport = .{ .persistent_allocator = allocator };
         defer request_transport.deinit(allocator);
 
         const previous_transport = self.transport;
