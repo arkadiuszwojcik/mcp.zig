@@ -91,12 +91,7 @@ pub const Method = enum {
 
     /// Parses a method name string into the corresponding enum value.
     pub fn fromString(str: []const u8) ?Method {
-        inline for (std.meta.fields(Method)) |field| {
-            if (std.mem.eql(u8, field.name, str)) {
-                return @enumFromInt(field.value);
-            }
-        }
-        return null;
+        return std.meta.stringToEnum(Method, str);
     }
 };
 

@@ -25,7 +25,7 @@ In this guide, you'll learn how to:
 
 Before you begin, make sure you have:
 
-- [Zig 0.16.0](https://ziglang.org/download/) or later installed (use mcp.zig 0.0.6)
+- [Zig 0.17.0](https://ziglang.org/download/) or later installed (use mcp.zig 0.0.6)
 - Zig 0.15.x users should use mcp.zig 0.0.3
 - Basic familiarity with Zig programming language
 

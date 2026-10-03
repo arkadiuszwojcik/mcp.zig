@@ -1,0 +1,386 @@
+//! Content extraction from parsed DOM trees.
+
+const std = @import("std");
+const Allocator = std.mem.Allocator;
+const dom = @import("dom.zig");
+const Tree = dom.Tree;
+const NO_NODE = dom.NO_NODE;
+
+pub const Metadata = struct {
+    title: []const u8 = "",
+    description: []const u8 = "",
+    keywords: []const u8 = "",
+    author: []const u8 = "",
+    canonical: []const u8 = "",
+    ogTitle: []const u8 = "",
+    ogDescription: []const u8 = "",
+    ogImage: []const u8 = "",
+    ogUrl: []const u8 = "",
+    ogType: []const u8 = "",
+    ogSiteName: []const u8 = "",
+    twitterCard: []const u8 = "",
+    twitterTitle: []const u8 = "",
+    twitterDescription: []const u8 = "",
+    twitterImage: []const u8 = "",
+    twitterSite: []const u8 = "",
+    charset: []const u8 = "",
+    viewport: []const u8 = "",
+    robots: []const u8 = "",
+    language: []const u8 = "",
+    generator: []const u8 = "",
+};
+
+pub fn extractMetadata(tree: *const Tree, allocator: Allocator) !Metadata {
+    var meta = Metadata{};
+    var w = try tree.walk(allocator, 0);
+    defer w.deinit();
+
+    while (w.next()) |idx| {
+        const node = tree.get(idx);
+        if (node.kind != .element) continue;
+
+        if (node.hasTag("title")) {
+            const child = node.firstChild;
+            if (child != NO_NODE and tree.get(child).kind == .text) {
+                meta.title = std.mem.trim(u8, tree.get(child).data, " \t\r\n");
+            }
+            continue;
+        }
+
+        if (node.hasTag("html")) {
+            if (node.attr("lang")) |lang| meta.language = lang;
+            continue;
+        }
+
+        if (node.hasTag("meta")) {
+            const name = node.attr("name") orelse node.attr("http-equiv") orelse "";
+            const property = node.attr("property") orelse "";
+            const content = node.attr("content") orelse "";
+            const charset = node.attr("charset") orelse "";
+
+            if (charset.len > 0) meta.charset = charset;
+
+            if (std.ascii.eqlIgnoreCase(name, "description")) meta.description = content;
+            if (std.ascii.eqlIgnoreCase(name, "keywords")) meta.keywords = content;
+            if (std.ascii.eqlIgnoreCase(name, "author")) meta.author = content;
+            if (std.ascii.eqlIgnoreCase(name, "viewport")) meta.viewport = content;
+            if (std.ascii.eqlIgnoreCase(name, "robots")) meta.robots = content;
+            if (std.ascii.eqlIgnoreCase(name, "generator")) meta.generator = content;
+
+            if (std.ascii.eqlIgnoreCase(property, "og:title")) meta.ogTitle = content;
+            if (std.ascii.eqlIgnoreCase(property, "og:description")) meta.ogDescription = content;
+            if (std.ascii.eqlIgnoreCase(property, "og:image")) meta.ogImage = content;
+            if (std.ascii.eqlIgnoreCase(property, "og:url")) meta.ogUrl = content;
+            if (std.ascii.eqlIgnoreCase(property, "og:type")) meta.ogType = content;
+            if (std.ascii.eqlIgnoreCase(property, "og:site_name")) meta.ogSiteName = content;
+
+            if (std.ascii.eqlIgnoreCase(name, "twitter:card")) meta.twitterCard = content;
+            if (std.ascii.eqlIgnoreCase(name, "twitter:title")) meta.twitterTitle = content;
+            if (std.ascii.eqlIgnoreCase(name, "twitter:description")) meta.twitterDescription = content;
+            if (std.ascii.eqlIgnoreCase(name, "twitter:image")) meta.twitterImage = content;
+            if (std.ascii.eqlIgnoreCase(name, "twitter:site")) meta.twitterSite = content;
+            continue;
+        }
+
+        if (node.hasTag("link")) {
+            if (node.attr("rel")) |rel| {
+                if (std.ascii.eqlIgnoreCase(rel, "canonical")) {
+                    meta.canonical = node.attr("href") orelse "";
+                }
+            }
+            continue;
+        }
+    }
+
+    return meta;
+}
+
+pub const Link = struct {
+    href: []const u8,
+    text: []const u8 = "",
+    rel: []const u8 = "",
+    title: []const u8 = "",
+    source: []const u8 = "a",
+};
+
+pub fn extractLinks(tree: *const Tree, allocator: Allocator) ![]Link {
+    var links: std.ArrayList(Link) = .empty;
+
+    var w = try tree.walk(allocator, 0);
+    defer w.deinit();
+
+    while (w.next()) |idx| {
+        const node = tree.get(idx);
+        if (node.kind != .element) continue;
+
+        if (node.hasTag("a") or node.hasTag("area")) {
+            const href = node.attr("href") orelse continue;
+            if (href.len == 0) continue;
+            const linkText = blk: {
+                var txt: std.ArrayList(u8) = .empty;
+                defer txt.deinit(allocator);
+                var child = node.firstChild;
+                while (child != NO_NODE) {
+                    const c = tree.get(child);
+                    if (c.kind == .text) try txt.appendSlice(allocator, c.data);
+                    child = c.nextSibling;
+                }
+                break :blk try txt.toOwnedSlice(allocator);
+            };
+            defer allocator.free(linkText);
+            try links.append(allocator, .{
+                .href = href,
+                .text = try allocator.dupe(u8, std.mem.trim(u8, linkText, " \t\r\n")),
+                .rel = node.attr("rel") orelse "",
+                .title = node.attr("title") orelse "",
+                .source = if (node.hasTag("a")) "a" else "area",
+            });
+        } else if (node.hasTag("link")) {
+            const href = node.attr("href") orelse continue;
+            if (href.len == 0) continue;
+            try links.append(allocator, .{
+                .href = href,
+                .rel = node.attr("rel") orelse "",
+                .title = node.attr("title") orelse "",
+                .source = "link",
+            });
+        }
+    }
+
+    return links.toOwnedSlice(allocator);
+}
+
+pub const FormField = struct {
+    name: []const u8,
+    kind: []const u8 = "text",
+    value: []const u8 = "",
+    placeholder: []const u8 = "",
+    required: bool = false,
+    disabled: bool = false,
+    options: []const []const u8 = &.{},
+};
+
+pub const Form = struct {
+    action: []const u8 = "",
+    method: []const u8 = "get",
+    enctype: []const u8 = "application/x-www-form-urlencoded",
+    fields: []const FormField = &.{},
+};
+
+pub fn extractForms(tree: *const Tree, allocator: Allocator) ![]Form {
+    var forms: std.ArrayList(Form) = .empty;
+
+    var w = try tree.walk(allocator, 0);
+    defer w.deinit();
+
+    while (w.next()) |idx| {
+        const node = tree.get(idx);
+        if (node.kind != .element or !node.hasTag("form")) continue;
+
+        const action = node.attr("action") orelse "";
+        const method = node.attr("method") orelse "get";
+        const enctype = node.attr("enctype") orelse "application/x-www-form-urlencoded";
+
+        var fields: std.ArrayList(FormField) = .empty;
+        try extractFormFields(tree, allocator, idx, &fields);
+
+        try forms.append(allocator, .{
+            .action = action,
+            .method = method,
+            .enctype = enctype,
+            .fields = try fields.toOwnedSlice(allocator),
+        });
+    }
+
+    return forms.toOwnedSlice(allocator);
+}
+
+fn extractFormFields(
+    tree: *const Tree,
+    allocator: Allocator,
+    formIdx: u32,
+    fields: *std.ArrayList(FormField),
+) !void {
+    var fw = try tree.walk(allocator, formIdx);
+    defer fw.deinit();
+    _ = fw.next();
+
+    while (fw.next()) |fidx| {
+        const node = tree.get(fidx);
+        if (node.kind != .element) continue;
+
+        if (node.hasTag("input") or node.hasTag("textarea") or node.hasTag("select")) {
+            const name = node.attr("name") orelse continue;
+            const kind = node.attr("type") orelse (if (node.hasTag("textarea")) "textarea" else if (node.hasTag("select")) "select" else "text");
+            var opts: []const []const u8 = &.{};
+            if (node.hasTag("select")) {
+                var optList: std.ArrayList([]const u8) = .empty;
+                var ow = try tree.walk(allocator, fidx);
+                defer ow.deinit();
+                _ = ow.next();
+                while (ow.next()) |oidx| {
+                    const on = tree.get(oidx);
+                    if (on.kind == .element and on.hasTag("option")) {
+                        const v = on.attr("value") orelse "";
+                        try optList.append(allocator, v);
+                    }
+                }
+                opts = try optList.toOwnedSlice(allocator);
+            }
+            try fields.append(allocator, .{
+                .name = name,
+                .kind = kind,
+                .value = node.attr("value") orelse "",
+                .placeholder = node.attr("placeholder") orelse "",
+                .required = node.attr("required") != null,
+                .disabled = node.attr("disabled") != null,
+                .options = opts,
+            });
+        } else if (node.hasTag("button")) {
+            const name = node.attr("name") orelse continue;
+            try fields.append(allocator, .{
+                .name = name,
+                .kind = node.attr("type") orelse "submit",
+                .value = node.attr("value") orelse "",
+            });
+        }
+    }
+}
+
+pub const Image = struct {
+    src: []const u8,
+    alt: []const u8 = "",
+    title: []const u8 = "",
+    width: []const u8 = "",
+    height: []const u8 = "",
+    loading: []const u8 = "",
+};
+
+pub fn extractImages(tree: *const Tree, allocator: Allocator) ![]Image {
+    var images: std.ArrayList(Image) = .empty;
+
+    var w = try tree.walk(allocator, 0);
+    defer w.deinit();
+
+    while (w.next()) |idx| {
+        const node = tree.get(idx);
+        if (node.kind != .element or !node.hasTag("img")) continue;
+        const src = node.attr("src") orelse continue;
+        if (src.len == 0) continue;
+        try images.append(allocator, .{
+            .src = src,
+            .alt = node.attr("alt") orelse "",
+            .title = node.attr("title") orelse "",
+            .width = node.attr("width") orelse "",
+            .height = node.attr("height") orelse "",
+            .loading = node.attr("loading") orelse "",
+        });
+    }
+
+    return images.toOwnedSlice(allocator);
+}
+
+pub const ScriptRef = struct {
+    src: []const u8,
+    asyncAttr: bool = false,
+    deferAttr: bool = false,
+    typeAttr: []const u8 = "",
+    integrity: []const u8 = "",
+};
+
+pub fn extractScripts(tree: *const Tree, allocator: Allocator) ![]ScriptRef {
+    var scripts: std.ArrayList(ScriptRef) = .empty;
+
+    var w = try tree.walk(allocator, 0);
+    defer w.deinit();
+
+    while (w.next()) |idx| {
+        const node = tree.get(idx);
+        if (node.kind != .element or !node.hasTag("script")) continue;
+        const src = node.attr("src") orelse continue;
+        if (src.len == 0) continue;
+        try scripts.append(allocator, .{
+            .src = src,
+            .asyncAttr = node.attr("async") != null,
+            .deferAttr = node.attr("defer") != null,
+            .typeAttr = node.attr("type") orelse "",
+            .integrity = node.attr("integrity") orelse "",
+        });
+    }
+
+    return scripts.toOwnedSlice(allocator);
+}
+
+pub const StyleRef = struct {
+    href: []const u8,
+    media: []const u8 = "",
+    integrity: []const u8 = "",
+};
+
+pub fn extractStylesheets(tree: *const Tree, allocator: Allocator) ![]StyleRef {
+    var styles: std.ArrayList(StyleRef) = .empty;
+
+    var w = try tree.walk(allocator, 0);
+    defer w.deinit();
+
+    while (w.next()) |idx| {
+        const node = tree.get(idx);
+        if (node.kind != .element or !node.hasTag("link")) continue;
+        const rel = node.attr("rel") orelse continue;
+        if (!std.ascii.eqlIgnoreCase(rel, "stylesheet")) continue;
+        const href = node.attr("href") orelse continue;
+        if (href.len == 0) continue;
+        try styles.append(allocator, .{
+            .href = href,
+            .media = node.attr("media") orelse "",
+            .integrity = node.attr("integrity") orelse "",
+        });
+    }
+
+    return styles.toOwnedSlice(allocator);
+}
+
+pub fn extractText(tree: *const Tree, allocator: Allocator) ![]u8 {
+    return extractNodeText(tree, 0, allocator);
+}
+
+test "extraction consumes tree-sitter-derived dom" {
+    const html = @import("html.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const al = arena.allocator();
+    var tree = try html.parse(al, "<html><head><title>T</title></head><body><a href=\"/a\">A</a><img src=\"i.png\" alt=\"I\"></body></html>", .{});
+    const links = try extractLinks(&tree, al);
+    try std.testing.expectEqual(@as(usize, 1), links.len);
+    try std.testing.expectEqualStrings("/a", links[0].href);
+    const meta = try extractMetadata(&tree, al);
+    try std.testing.expectEqualStrings("T", meta.title);
+    const images = try extractImages(&tree, al);
+    try std.testing.expectEqual(@as(usize, 1), images.len);
+}
+
+pub fn extractNodeText(tree: *const Tree, rootIdx: u32, allocator: Allocator) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+
+    var w = try tree.walk(allocator, rootIdx);
+    defer w.deinit();
+
+    while (w.next()) |idx| {
+        const node = tree.get(idx);
+        if (node.kind == .element) {
+            if (node.hasTag("script") or node.hasTag("style") or node.hasTag("noscript")) {
+                continue;
+            }
+        }
+        if (node.kind == .text) {
+            const trimmed = std.mem.trim(u8, node.data, " \t\r\n\x0C");
+            if (trimmed.len > 0) {
+                if (buf.items.len > 0) try buf.append(allocator, ' ');
+                try buf.appendSlice(allocator, trimmed);
+            }
+        }
+    }
+
+    return buf.toOwnedSlice(allocator);
+}

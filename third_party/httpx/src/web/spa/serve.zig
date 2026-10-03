@@ -1,0 +1,44 @@
+//! SPA (Single-Page Application) serving.
+//!
+//! Mounts a static directory and provides an index.html fallback handler
+//! for frontend client-side routing.
+
+const std = @import("std");
+const Allocator = std.mem.Allocator;
+const routerMod = @import("../router/router.zig");
+const Router = routerMod.Router;
+const Context = routerMod.Context;
+const Response = routerMod.Response;
+const staticFiles = @import("../static_files/serve.zig");
+
+pub const Config = struct {
+    /// The filesystem path to the SPA directory (e.g. "./dist").
+    root: []const u8,
+    /// The fallback file for unmatched routes (default: "index.html").
+    fallback: []const u8 = "index.html",
+    /// URL prefix under which real files are served.
+    mount: []const u8 = "/",
+    /// Serve from the embedded registry only; never touch the filesystem.
+    filesystem: bool = true,
+};
+
+/// Register the SPA's static assets on the router.
+///
+/// API routes should be registered BEFORE calling this so they take
+/// precedence; register it last so the static mount only claims what
+/// remains.
+pub fn register(router: *Router, cfg: Config) !void {
+    try staticFiles.register(router, .{
+        .root = cfg.root,
+        .mount = cfg.mount,
+        .indexFile = cfg.fallback,
+        .spaFallback = cfg.fallback,
+        .filesystem = cfg.filesystem,
+    });
+}
+
+test "spa config defaults" {
+    const cfg = Config{ .root = "./dist" };
+    try std.testing.expectEqualStrings("index.html", cfg.fallback);
+    try std.testing.expectEqualStrings("/", cfg.mount);
+}

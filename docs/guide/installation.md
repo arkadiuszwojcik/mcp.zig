@@ -10,7 +10,7 @@ This guide covers different ways to install and use mcp.zig in your project.
 
 ## Requirements
 
-- **Zig 0.16.0** or later (use mcp.zig 0.0.6)
+- **Zig 0.17.0** or later (use mcp.zig 0.0.6)
 - **Zig 0.15.x** (use mcp.zig 0.0.3)
 - A Zig project with `build.zig` and `build.zig.zon`
 

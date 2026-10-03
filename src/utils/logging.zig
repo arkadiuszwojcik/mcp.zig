@@ -23,10 +23,7 @@ pub const Level = enum(u8) {
 
     /// Parses a log level from its string representation.
     pub fn fromString(str: []const u8) ?Level {
-        inline for (std.meta.fields(Level)) |f| {
-            if (std.mem.eql(u8, f.name, str)) return @enumFromInt(f.value);
-        }
-        return null;
+        return std.meta.stringToEnum(Level, str);
     }
 };
 

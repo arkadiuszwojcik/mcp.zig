@@ -1,0 +1,128 @@
+//! GraphQL AST nodes and lexer definitions.
+//!
+//! Full GraphQL Specification support:
+//! - Queries, Mutations, Subscriptions
+//! - Fields, Aliases, Arguments, Directives
+//! - Variables, Inline Fragments, Named Fragments
+//! - Selection Sets, Object Values, List Values
+
+const std = @import("std");
+const Allocator = std.mem.Allocator;
+
+pub const TokenKind = enum {
+    eof,
+    name,
+    intValue,
+    floatValue,
+    stringValue,
+    punctuatorBang, // !
+    punctuatorDollar, // $
+    punctuatorAmp, // &
+    punctuatorParenL, // (
+    punctuatorParenR, // )
+    punctuatorSpread, // ...
+    punctuatorColon, // :
+    punctuatorEquals, // =
+    punctuatorAt, // @
+    punctuatorBracketL, // [
+    punctuatorBracketR, // ]
+    punctuatorBraceL, // {
+    punctuatorPipe, // |
+    punctuatorBraceR, // }
+};
+
+pub const Token = struct {
+    kind: TokenKind,
+    text: []const u8,
+    pos: usize,
+};
+
+pub const Value = union(enum) {
+    variable: []const u8,
+    int: i64,
+    float: f64,
+    string: []const u8,
+    boolean: bool,
+    nullVal: void,
+    enumVal: []const u8,
+    list: []const Value,
+    object: []const ObjectField,
+};
+
+pub const ObjectField = struct {
+    name: []const u8,
+    value: Value,
+};
+
+pub const Argument = struct {
+    name: []const u8,
+    value: Value,
+};
+
+pub const Directive = struct {
+    name: []const u8,
+    arguments: []const Argument,
+};
+
+pub const Selection = union(enum) {
+    field: Field,
+    fragmentSpread: FragmentSpread,
+    inlineFragment: InlineFragment,
+};
+
+pub const Field = struct {
+    alias: ?[]const u8 = null,
+    name: []const u8,
+    arguments: []const Argument = &.{},
+    directives: []const Directive = &.{},
+    selectionSet: []const Selection = &.{},
+};
+
+pub const FragmentSpread = struct {
+    name: []const u8,
+    directives: []const Directive = &.{},
+};
+
+pub const InlineFragment = struct {
+    typeCondition: ?[]const u8 = null,
+    directives: []const Directive = &.{},
+    selectionSet: []const Selection = &.{},
+};
+
+pub const OperationType = enum {
+    query,
+    mutation,
+    subscription,
+};
+
+pub const VariableDefinition = struct {
+    name: []const u8,
+    typeName: []const u8,
+    isNonNull: bool = false,
+    isList: bool = false,
+    defaultValue: ?Value = null,
+};
+
+pub const OperationDefinition = struct {
+    operationType: OperationType,
+    name: ?[]const u8 = null,
+    variableDefinitions: []const VariableDefinition = &.{},
+    directives: []const Directive = &.{},
+    selectionSet: []const Selection = &.{},
+};
+
+pub const FragmentDefinition = struct {
+    name: []const u8,
+    typeCondition: []const u8,
+    directives: []const Directive = &.{},
+    selectionSet: []const Selection = &.{},
+};
+
+pub const Definition = union(enum) {
+    operation: OperationDefinition,
+    fragment: FragmentDefinition,
+};
+
+pub const Document = struct {
+    definitions: []const Definition,
+};

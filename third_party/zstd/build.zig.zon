@@ -1,0 +1,13 @@
+.{
+    .name = .zstd,
+    .version = "0.0.3",
+    .minimum_zig_version = "0.17.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "LICENSE",
+        "src",
+        "README.md",
+    },
+    .fingerprint = 0x72fd505e8cf8216e,
+}

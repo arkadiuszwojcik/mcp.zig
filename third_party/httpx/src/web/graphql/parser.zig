@@ -1,0 +1,591 @@
+//! GraphQL Lexer and Recursive Descent Parser.
+//!
+//! Follows GraphQL specification (October 2021):
+//! - Ignored tokens: whitespace, commas, comments (#)
+//! - Operation parsing (query, mutation, subscription, shorthand)
+//! - Arguments, directives, variable definitions, fragments
+//! - Full value tree (scalars, enums, objects, lists)
+//! - Depth and complexity limits protection
+//!
+//! References:
+//!   - GraphQL Specification Section 2 — Language
+
+const std = @import("std");
+const Allocator = std.mem.Allocator;
+const ast = @import("ast.zig");
+
+pub const ParseLimits = struct {
+    maxDepth: usize = 64,
+    maxTokens: usize = 10000,
+    maxLength: usize = 1024 * 1024,
+};
+
+pub const ParseError = error{
+    OutOfMemory,
+    RequestEntityTooLarge,
+    TokenLimitExceeded,
+    UnterminatedString,
+    UnexpectedCharacter,
+    EmptyDocument,
+    ExpectedDefinition,
+    ExpectedFragmentName,
+    ExpectedOnKeyword,
+    ExpectedTypeCondition,
+    ExpectedDollar,
+    ExpectedVariableName,
+    ExpectedColon,
+    ExpectedTypeName,
+    ExpectedClosingBracket,
+    ExpectedClosingParen,
+    ExpectedDirectiveName,
+    ExpectedArgumentName,
+    ExpectedBraceOpen,
+    ExpectedBraceClose,
+    ExpectedFieldName,
+    MaxQueryDepthExceeded,
+    InvalidInt,
+    InvalidFloat,
+    ExpectedBracketClose,
+    UnexpectedValueToken,
+};
+
+pub const Parser = struct {
+    allocator: Allocator,
+    source: []const u8,
+    pos: usize = 0,
+    currentToken: ast.Token = .{ .kind = .eof, .text = "", .pos = 0 },
+    tokensRead: usize = 0,
+    currentDepth: usize = 0,
+    limits: ParseLimits,
+
+    pub fn init(allocator: Allocator, source: []const u8, limits: ParseLimits) ParseError!Parser {
+        if (source.len > limits.maxLength) return error.RequestEntityTooLarge;
+        var p = Parser{
+            .allocator = allocator,
+            .source = source,
+            .limits = limits,
+        };
+        try p.advance();
+        return p;
+    }
+
+    fn skipWhitespaceAndComments(self: *Parser) void {
+        while (self.pos < self.source.len) {
+            const c = self.source[self.pos];
+            if (c == ' ' or c == '\t' or c == '\r' or c == '\n' or c == ',') {
+                self.pos += 1;
+            } else if (c == '#') {
+                while (self.pos < self.source.len and self.source[self.pos] != '\n') {
+                    self.pos += 1;
+                }
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn isNameStart(c: u8) bool {
+        return std.ascii.isAlphabetic(c) or c == '_';
+    }
+
+    fn isNameContinue(c: u8) bool {
+        return isNameStart(c) or std.ascii.isDigit(c);
+    }
+
+    pub fn advance(self: *Parser) !void {
+        self.skipWhitespaceAndComments();
+        if (self.pos >= self.source.len) {
+            self.currentToken = .{ .kind = .eof, .text = "", .pos = self.pos };
+            return;
+        }
+
+        self.tokensRead += 1;
+        if (self.tokensRead > self.limits.maxTokens) {
+            return error.TokenLimitExceeded;
+        }
+
+        const start = self.pos;
+        const c = self.source[self.pos];
+
+        if (c == '!') {
+            self.pos += 1;
+            self.currentToken = .{ .kind = .punctuatorBang, .text = self.source[start..self.pos], .pos = start };
+        } else if (c == '$') {
+            self.pos += 1;
+            self.currentToken = .{ .kind = .punctuatorDollar, .text = self.source[start..self.pos], .pos = start };
+        } else if (c == '&') {
+            self.pos += 1;
+            self.currentToken = .{ .kind = .punctuatorAmp, .text = self.source[start..self.pos], .pos = start };
+        } else if (c == '(') {
+            self.pos += 1;
+            self.currentToken = .{ .kind = .punctuatorParenL, .text = self.source[start..self.pos], .pos = start };
+        } else if (c == ')') {
+            self.pos += 1;
+            self.currentToken = .{ .kind = .punctuatorParenR, .text = self.source[start..self.pos], .pos = start };
+        } else if (c == ':') {
+            self.pos += 1;
+            self.currentToken = .{ .kind = .punctuatorColon, .text = self.source[start..self.pos], .pos = start };
+        } else if (c == '=') {
+            self.pos += 1;
+            self.currentToken = .{ .kind = .punctuatorEquals, .text = self.source[start..self.pos], .pos = start };
+        } else if (c == '@') {
+            self.pos += 1;
+            self.currentToken = .{ .kind = .punctuatorAt, .text = self.source[start..self.pos], .pos = start };
+        } else if (c == '[') {
+            self.pos += 1;
+            self.currentToken = .{ .kind = .punctuatorBracketL, .text = self.source[start..self.pos], .pos = start };
+        } else if (c == ']') {
+            self.pos += 1;
+            self.currentToken = .{ .kind = .punctuatorBracketR, .text = self.source[start..self.pos], .pos = start };
+        } else if (c == '{') {
+            self.pos += 1;
+            self.currentToken = .{ .kind = .punctuatorBraceL, .text = self.source[start..self.pos], .pos = start };
+        } else if (c == '|') {
+            self.pos += 1;
+            self.currentToken = .{ .kind = .punctuatorPipe, .text = self.source[start..self.pos], .pos = start };
+        } else if (c == '}') {
+            self.pos += 1;
+            self.currentToken = .{ .kind = .punctuatorBraceR, .text = self.source[start..self.pos], .pos = start };
+        } else if (c == '.' and self.pos + 2 < self.source.len and self.source[self.pos + 1] == '.' and self.source[self.pos + 2] == '.') {
+            self.pos += 3;
+            self.currentToken = .{ .kind = .punctuatorSpread, .text = self.source[start..self.pos], .pos = start };
+        } else if (isNameStart(c)) {
+            while (self.pos < self.source.len and isNameContinue(self.source[self.pos])) {
+                self.pos += 1;
+            }
+            self.currentToken = .{ .kind = .name, .text = self.source[start..self.pos], .pos = start };
+        } else if (c == '-' or (c >= '0' and c <= '9')) {
+            var isFloat = false;
+            if (c == '-') self.pos += 1;
+            while (self.pos < self.source.len and (self.source[self.pos] >= '0' and self.source[self.pos] <= '9')) {
+                self.pos += 1;
+            }
+            if (self.pos < self.source.len and self.source[self.pos] == '.') {
+                isFloat = true;
+                self.pos += 1;
+                while (self.pos < self.source.len and (self.source[self.pos] >= '0' and self.source[self.pos] <= '9')) {
+                    self.pos += 1;
+                }
+            }
+            if (self.pos < self.source.len and (self.source[self.pos] == 'e' or self.source[self.pos] == 'E')) {
+                isFloat = true;
+                self.pos += 1;
+                if (self.pos < self.source.len and (self.source[self.pos] == '+' or self.source[self.pos] == '-')) {
+                    self.pos += 1;
+                }
+                while (self.pos < self.source.len and (self.source[self.pos] >= '0' and self.source[self.pos] <= '9')) {
+                    self.pos += 1;
+                }
+            }
+            self.currentToken = .{
+                .kind = if (isFloat) .floatValue else .intValue,
+                .text = self.source[start..self.pos],
+                .pos = start,
+            };
+        } else if (c == '"') {
+            self.pos += 1;
+            var escaped = false;
+            const strStart = self.pos;
+            while (self.pos < self.source.len) {
+                const sc = self.source[self.pos];
+                if (escaped) {
+                    escaped = false;
+                    self.pos += 1;
+                } else if (sc == '\\') {
+                    escaped = true;
+                    self.pos += 1;
+                } else if (sc == '"') {
+                    break;
+                } else {
+                    self.pos += 1;
+                }
+            }
+            if (self.pos >= self.source.len or self.source[self.pos] != '"') {
+                return error.UnterminatedString;
+            }
+            const content = self.source[strStart..self.pos];
+            self.pos += 1; // skip closing quote
+            self.currentToken = .{ .kind = .stringValue, .text = content, .pos = start };
+        } else {
+            return error.UnexpectedCharacter;
+        }
+    }
+
+    pub fn parseDocument(self: *Parser) ParseError!ast.Document {
+        var defs = std.ArrayList(ast.Definition).empty;
+        while (self.currentToken.kind != .eof) {
+            const def = try self.parseDefinition();
+            try defs.append(self.allocator, def);
+        }
+        if (defs.items.len == 0) return error.EmptyDocument;
+        return ast.Document{ .definitions = try defs.toOwnedSlice(self.allocator) };
+    }
+
+    fn parseDefinition(self: *Parser) ParseError!ast.Definition {
+        if (self.currentToken.kind == .punctuatorBraceL) {
+            // Shorthand query
+            const selSet = try self.parseSelectionSet();
+            return ast.Definition{
+                .operation = .{
+                    .operationType = .query,
+                    .selectionSet = selSet,
+                },
+            };
+        }
+
+        if (self.currentToken.kind == .name) {
+            if (std.mem.eql(u8, self.currentToken.text, "query")) {
+                return ast.Definition{ .operation = try self.parseOperation(.query) };
+            } else if (std.mem.eql(u8, self.currentToken.text, "mutation")) {
+                return ast.Definition{ .operation = try self.parseOperation(.mutation) };
+            } else if (std.mem.eql(u8, self.currentToken.text, "subscription")) {
+                return ast.Definition{ .operation = try self.parseOperation(.subscription) };
+            } else if (std.mem.eql(u8, self.currentToken.text, "fragment")) {
+                return ast.Definition{ .fragment = try self.parseFragment() };
+            }
+        }
+
+        return error.ExpectedDefinition;
+    }
+
+    fn parseOperation(self: *Parser, opType: ast.OperationType) ParseError!ast.OperationDefinition {
+        try self.advance(); // consume query/mutation/subscription
+        var name: ?[]const u8 = null;
+        if (self.currentToken.kind == .name) {
+            name = self.currentToken.text;
+            try self.advance();
+        }
+
+        var varDefs: []const ast.VariableDefinition = &.{};
+        if (self.currentToken.kind == .punctuatorParenL) {
+            varDefs = try self.parseVariableDefinitions();
+        }
+
+        var directives: []const ast.Directive = &.{};
+        if (self.currentToken.kind == .punctuatorAt) {
+            directives = try self.parseDirectives();
+        }
+
+        const selSet = try self.parseSelectionSet();
+        return ast.OperationDefinition{
+            .operationType = opType,
+            .name = name,
+            .variableDefinitions = varDefs,
+            .directives = directives,
+            .selectionSet = selSet,
+        };
+    }
+
+    fn parseFragment(self: *Parser) ParseError!ast.FragmentDefinition {
+        try self.advance(); // consume 'fragment'
+        if (self.currentToken.kind != .name or std.mem.eql(u8, self.currentToken.text, "on")) {
+            return error.ExpectedFragmentName;
+        }
+        const name = self.currentToken.text;
+        try self.advance();
+
+        if (self.currentToken.kind != .name or !std.mem.eql(u8, self.currentToken.text, "on")) {
+            return error.ExpectedOnKeyword;
+        }
+        try self.advance();
+
+        if (self.currentToken.kind != .name) {
+            return error.ExpectedTypeCondition;
+        }
+        const typeCondition = self.currentToken.text;
+        try self.advance();
+
+        var directives: []const ast.Directive = &.{};
+        if (self.currentToken.kind == .punctuatorAt) {
+            directives = try self.parseDirectives();
+        }
+
+        const selSet = try self.parseSelectionSet();
+        return ast.FragmentDefinition{
+            .name = name,
+            .typeCondition = typeCondition,
+            .directives = directives,
+            .selectionSet = selSet,
+        };
+    }
+
+    fn parseVariableDefinitions(self: *Parser) ParseError![]const ast.VariableDefinition {
+        try self.advance(); // consume '('
+        var list = std.ArrayList(ast.VariableDefinition).empty;
+        while (self.currentToken.kind != .punctuatorParenR and self.currentToken.kind != .eof) {
+            if (self.currentToken.kind != .punctuatorDollar) return error.ExpectedDollar;
+            try self.advance();
+            if (self.currentToken.kind != .name) return error.ExpectedVariableName;
+            const varName = self.currentToken.text;
+            try self.advance();
+
+            if (self.currentToken.kind != .punctuatorColon) return error.ExpectedColon;
+            try self.advance();
+
+            var isList = false;
+            var typeName: []const u8 = "";
+            if (self.currentToken.kind == .punctuatorBracketL) {
+                isList = true;
+                try self.advance();
+                if (self.currentToken.kind != .name) return error.ExpectedTypeName;
+                typeName = self.currentToken.text;
+                try self.advance();
+                if (self.currentToken.kind != .punctuatorBracketR) return error.ExpectedClosingBracket;
+                try self.advance();
+            } else if (self.currentToken.kind == .name) {
+                typeName = self.currentToken.text;
+                try self.advance();
+            } else {
+                return error.ExpectedTypeName;
+            }
+
+            var isNonNull = false;
+            if (self.currentToken.kind == .punctuatorBang) {
+                isNonNull = true;
+                try self.advance();
+            }
+
+            var defaultVal: ?ast.Value = null;
+            if (self.currentToken.kind == .punctuatorEquals) {
+                try self.advance();
+                defaultVal = try self.parseValue();
+            }
+
+            try list.append(self.allocator, .{
+                .name = varName,
+                .typeName = typeName,
+                .isNonNull = isNonNull,
+                .isList = isList,
+                .defaultValue = defaultVal,
+            });
+        }
+        if (self.currentToken.kind != .punctuatorParenR) return error.ExpectedClosingParen;
+        try self.advance();
+        return try list.toOwnedSlice(self.allocator);
+    }
+
+    fn parseDirectives(self: *Parser) ParseError![]const ast.Directive {
+        var list = std.ArrayList(ast.Directive).empty;
+        while (self.currentToken.kind == .punctuatorAt) {
+            try self.advance();
+            if (self.currentToken.kind != .name) return error.ExpectedDirectiveName;
+            const name = self.currentToken.text;
+            try self.advance();
+            var args: []const ast.Argument = &.{};
+            if (self.currentToken.kind == .punctuatorParenL) {
+                args = try self.parseArguments();
+            }
+            try list.append(self.allocator, .{ .name = name, .arguments = args });
+        }
+        return try list.toOwnedSlice(self.allocator);
+    }
+
+    fn parseArguments(self: *Parser) ParseError![]const ast.Argument {
+        try self.advance(); // consume '('
+        var list = std.ArrayList(ast.Argument).empty;
+        while (self.currentToken.kind != .punctuatorParenR and self.currentToken.kind != .eof) {
+            if (self.currentToken.kind != .name) return error.ExpectedArgumentName;
+            const name = self.currentToken.text;
+            try self.advance();
+            if (self.currentToken.kind != .punctuatorColon) return error.ExpectedColon;
+            try self.advance();
+            const val = try self.parseValue();
+            try list.append(self.allocator, .{ .name = name, .value = val });
+        }
+        if (self.currentToken.kind != .punctuatorParenR) return error.ExpectedClosingParen;
+        try self.advance();
+        return try list.toOwnedSlice(self.allocator);
+    }
+
+    fn parseSelectionSet(self: *Parser) ParseError![]const ast.Selection {
+        if (self.currentToken.kind != .punctuatorBraceL) return error.ExpectedBraceOpen;
+        self.currentDepth += 1;
+        if (self.currentDepth > self.limits.maxDepth) return error.MaxQueryDepthExceeded;
+        defer self.currentDepth -= 1;
+
+        try self.advance(); // consume '{'
+        var list = std.ArrayList(ast.Selection).empty;
+        while (self.currentToken.kind != .punctuatorBraceR and self.currentToken.kind != .eof) {
+            const sel = try self.parseSelection();
+            try list.append(self.allocator, sel);
+        }
+        if (self.currentToken.kind != .punctuatorBraceR) return error.ExpectedBraceClose;
+        try self.advance();
+        return try list.toOwnedSlice(self.allocator);
+    }
+
+    fn parseSelection(self: *Parser) ParseError!ast.Selection {
+        if (self.currentToken.kind == .punctuatorSpread) {
+            try self.advance(); // consume '...'
+            if (self.currentToken.kind == .name and !std.mem.eql(u8, self.currentToken.text, "on")) {
+                const fragName = self.currentToken.text;
+                try self.advance();
+                var dirs: []const ast.Directive = &.{};
+                if (self.currentToken.kind == .punctuatorAt) dirs = try self.parseDirectives();
+                return ast.Selection{ .fragmentSpread = .{ .name = fragName, .directives = dirs } };
+            } else {
+                var typeCondition: ?[]const u8 = null;
+                if (self.currentToken.kind == .name and std.mem.eql(u8, self.currentToken.text, "on")) {
+                    try self.advance();
+                    if (self.currentToken.kind != .name) return error.ExpectedTypeCondition;
+                    typeCondition = self.currentToken.text;
+                    try self.advance();
+                }
+                var dirs: []const ast.Directive = &.{};
+                if (self.currentToken.kind == .punctuatorAt) dirs = try self.parseDirectives();
+                const selSet = try self.parseSelectionSet();
+                return ast.Selection{
+                    .inlineFragment = .{
+                        .typeCondition = typeCondition,
+                        .directives = dirs,
+                        .selectionSet = selSet,
+                    },
+                };
+            }
+        }
+
+        if (self.currentToken.kind != .name) return error.ExpectedFieldName;
+        const name1 = self.currentToken.text;
+        try self.advance();
+
+        var alias: ?[]const u8 = null;
+        var name: []const u8 = name1;
+
+        if (self.currentToken.kind == .punctuatorColon) {
+            alias = name1;
+            try self.advance();
+            if (self.currentToken.kind != .name) return error.ExpectedFieldName;
+            name = self.currentToken.text;
+            try self.advance();
+        }
+
+        var args: []const ast.Argument = &.{};
+        if (self.currentToken.kind == .punctuatorParenL) {
+            args = try self.parseArguments();
+        }
+
+        var dirs: []const ast.Directive = &.{};
+        if (self.currentToken.kind == .punctuatorAt) {
+            dirs = try self.parseDirectives();
+        }
+
+        var subSel: []const ast.Selection = &.{};
+        if (self.currentToken.kind == .punctuatorBraceL) {
+            subSel = try self.parseSelectionSet();
+        }
+
+        return ast.Selection{
+            .field = .{
+                .alias = alias,
+                .name = name,
+                .arguments = args,
+                .directives = dirs,
+                .selectionSet = subSel,
+            },
+        };
+    }
+
+    pub fn parseValue(self: *Parser) !ast.Value {
+        switch (self.currentToken.kind) {
+            .punctuatorDollar => {
+                try self.advance();
+                if (self.currentToken.kind != .name) return error.ExpectedVariableName;
+                const v = self.currentToken.text;
+                try self.advance();
+                return ast.Value{ .variable = v };
+            },
+            .intValue => {
+                const val = std.fmt.parseInt(i64, self.currentToken.text, 10) catch return error.InvalidInt;
+                try self.advance();
+                return ast.Value{ .int = val };
+            },
+            .floatValue => {
+                const val = std.fmt.parseFloat(f64, self.currentToken.text) catch return error.InvalidFloat;
+                try self.advance();
+                return ast.Value{ .float = val };
+            },
+            .stringValue => {
+                const val = self.currentToken.text;
+                try self.advance();
+                return ast.Value{ .string = val };
+            },
+            .name => {
+                const txt = self.currentToken.text;
+                try self.advance();
+                if (std.mem.eql(u8, txt, "true")) {
+                    return ast.Value{ .boolean = true };
+                } else if (std.mem.eql(u8, txt, "false")) {
+                    return ast.Value{ .boolean = false };
+                } else if (std.mem.eql(u8, txt, "null")) {
+                    return ast.Value{ .nullVal = {} };
+                } else {
+                    return ast.Value{ .enumVal = txt };
+                }
+            },
+            .punctuatorBracketL => {
+                try self.advance();
+                var items = std.ArrayList(ast.Value).empty;
+                while (self.currentToken.kind != .punctuatorBracketR and self.currentToken.kind != .eof) {
+                    const item = try self.parseValue();
+                    try items.append(self.allocator, item);
+                }
+                if (self.currentToken.kind != .punctuatorBracketR) return error.ExpectedBracketClose;
+                try self.advance();
+                return ast.Value{ .list = try items.toOwnedSlice(self.allocator) };
+            },
+            .punctuatorBraceL => {
+                try self.advance();
+                var fields = std.ArrayList(ast.ObjectField).empty;
+                while (self.currentToken.kind != .punctuatorBraceR and self.currentToken.kind != .eof) {
+                    if (self.currentToken.kind != .name) return error.ExpectedFieldName;
+                    const fnName = self.currentToken.text;
+                    try self.advance();
+                    if (self.currentToken.kind != .punctuatorColon) return error.ExpectedColon;
+                    try self.advance();
+                    const val = try self.parseValue();
+                    try fields.append(self.allocator, .{ .name = fnName, .value = val });
+                }
+                if (self.currentToken.kind != .punctuatorBraceR) return error.ExpectedBraceClose;
+                try self.advance();
+                return ast.Value{ .object = try fields.toOwnedSlice(self.allocator) };
+            },
+            else => return error.UnexpectedValueToken,
+        }
+    }
+};
+
+test "parse basic query" {
+    const a = std.testing.allocator;
+    const q =
+        \\query MyQuery($limit: Int = 10) {
+        \\  users(limit: $limit) {
+        \\    id
+        \\    name
+        \\    ... UserFields
+        \\  }
+        \\}
+        \\fragment UserFields on User {
+        \\  email
+        \\}
+    ;
+    var p = try Parser.init(a, q, .{});
+    const doc = try p.parseDocument();
+    defer {
+        for (doc.definitions) |d| {
+            switch (d) {
+                .operation => |op| {
+                    a.free(op.variableDefinitions);
+                    a.free(op.selectionSet[0].field.arguments);
+                    a.free(op.selectionSet[0].field.selectionSet);
+                    a.free(op.selectionSet);
+                },
+                .fragment => |f| {
+                    a.free(f.selectionSet);
+                },
+            }
+        }
+        a.free(doc.definitions);
+    }
+    try std.testing.expectEqual(@as(usize, 2), doc.definitions.len);
+    try std.testing.expectEqualStrings("MyQuery", doc.definitions[0].operation.name.?);
+}
