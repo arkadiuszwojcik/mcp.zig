@@ -76,9 +76,11 @@ For the official MCP specification and documentation, visit [modelcontextprotoco
 mcp.zig requires **Zig 0.17.0** or later (`minimum_zig_version` in `build.zig.zon`).
 
 ```bash
+# Stable release (v0.0.9)
+zig fetch --save https://github.com/muhammad-fiaz/mcp.zig/archive/refs/tags/0.0.9.tar.gz
+
+# Or nightly development (main branch)
 zig fetch --save git+https://github.com/muhammad-fiaz/mcp.zig.git
-zig build                  # static library
-zig build run-all-examples # library plus every example
 ```
 
 Wire the module into your `build.zig`:

@@ -35,12 +35,16 @@ Before you begin, make sure you have:
 Run the following command in your project directory:
 
 ```bash
-# Latest development branch
-zig fetch --save git+https://github.com/muhammad-fiaz/mcp.zig.git
-
-# Zig 0.17.0
+# Stable release (v0.0.9 for Zig 0.17.0+)
 zig fetch --save https://github.com/muhammad-fiaz/mcp.zig/archive/refs/tags/0.0.9.tar.gz
 
+# Or nightly development (main branch)
+zig fetch --save git+https://github.com/muhammad-fiaz/mcp.zig.git
+```
+
+For older Zig compiler versions:
+
+```bash
 # Zig 0.16.x
 zig fetch --save https://github.com/muhammad-fiaz/mcp.zig/archive/refs/tags/0.0.6.tar.gz
 

@@ -103,20 +103,48 @@ For the official MCP specification and resources, visit:
 
 mcp.zig requires **Zig 0.17.0** or later (`minimum_zig_version` in `build.zig.zon`).
 
-Add the package to your project:
+Add the package to your project using Zig's package manager:
+
+#### Stable Release (v0.0.9)
+
+```bash
+zig fetch --save https://github.com/muhammad-fiaz/mcp.zig/archive/refs/tags/0.0.9.tar.gz
+```
+
+#### Nightly / Development (`main` branch)
 
 ```bash
 zig fetch --save git+https://github.com/muhammad-fiaz/mcp.zig.git
 ```
 
-Build it with `zig build`:
+#### In `build.zig.zon`
 
-```bash
-zig build                  # static library
-zig build run-all-examples # library plus every example
+`zig fetch --save` automatically populates your `build.zig.zon` with the dependency and its content hash:
+
+```zig
+.{
+    .name = .my_project,
+    .version = "0.1.0",
+    .fingerprint = 0x1234567890abcdef,
+    .dependencies = .{
+        // Stable release:
+        .mcp = .{
+            .url = "https://github.com/muhammad-fiaz/mcp.zig/archive/refs/tags/0.0.9.tar.gz",
+            .hash = "...", // generated automatically by zig fetch --save
+        },
+        // Or nightly development:
+        // .mcp = .{
+        //     .url = "git+https://github.com/muhammad-fiaz/mcp.zig.git",
+        //     .hash = "...",
+        // },
+    },
+    .paths = .{ "" },
+}
 ```
 
-Then in your `build.zig`:
+#### In `build.zig`
+
+Wire the module into your executable or library:
 
 ```zig
 const mcp_dep = b.dependency("mcp", .{
@@ -124,6 +152,12 @@ const mcp_dep = b.dependency("mcp", .{
     .optimize = optimize,
 });
 exe.root_module.addImport("mcp", mcp_dep.module("mcp"));
+```
+
+Build your project with `zig build`:
+
+```bash
+zig build                  # build your project
 ```
 
 ### Creating a Server

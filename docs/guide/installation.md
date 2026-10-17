@@ -21,15 +21,21 @@ The recommended way to use mcp.zig is through Zig's built-in package manager.
 
 ### Step 1: Add Dependency
 
-Run the following command to add mcp.zig to your project:
+#### Option A: Stable Release (v0.0.9 for Zig 0.17.0+)
 
 ```bash
-# Latest development branch
-zig fetch --save git+https://github.com/muhammad-fiaz/mcp.zig.git
-
-# Zig 0.17.0
 zig fetch --save https://github.com/muhammad-fiaz/mcp.zig/archive/refs/tags/0.0.9.tar.gz
+```
 
+#### Option B: Nightly / Development (`main` branch)
+
+```bash
+zig fetch --save git+https://github.com/muhammad-fiaz/mcp.zig.git
+```
+
+#### Legacy Zig Versions
+
+```bash
 # Zig 0.16.x
 zig fetch --save https://github.com/muhammad-fiaz/mcp.zig/archive/refs/tags/0.0.6.tar.gz
 
@@ -37,7 +43,28 @@ zig fetch --save https://github.com/muhammad-fiaz/mcp.zig/archive/refs/tags/0.0.
 zig fetch --save https://github.com/muhammad-fiaz/mcp.zig/archive/refs/tags/0.0.3.tar.gz
 ```
 
-This will automatically update your `build.zig.zon` with the dependency and correct hash.
+Running `zig fetch --save` automatically writes the dependency and computed hash into your `build.zig.zon`:
+
+```zig
+.{
+    .name = .my_project,
+    .version = "0.1.0",
+    .fingerprint = 0x1234567890abcdef,
+    .dependencies = .{
+        // Stable release:
+        .mcp = .{
+            .url = "https://github.com/muhammad-fiaz/mcp.zig/archive/refs/tags/0.0.9.tar.gz",
+            .hash = "...", // populated automatically by zig fetch --save
+        },
+        // Or nightly (development):
+        // .mcp = .{
+        //     .url = "git+https://github.com/muhammad-fiaz/mcp.zig.git",
+        //     .hash = "...",
+        // },
+    },
+    .paths = .{ "" },
+}
+```
 
 ### Step 2: Configure Build
 
