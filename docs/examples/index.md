@@ -60,6 +60,10 @@ Request validation for tool arguments using `RequestValidator`.
 
 Rate limiting for tool calls using `RateLimiter`.
 
+#### [MCP Apps Server](/examples/mcp-app-server)
+
+Interactive UI application server using the MCP Apps extension (`io.modelcontextprotocol/ui`), `mcp.MIME_TYPE_MCP_APP`, and `_meta.ui`.
+
 ### Clients
 
 #### [Simple Client](/examples/simple-client)
@@ -69,6 +73,12 @@ A basic MCP client demonstrating capability declaration, roots, and server disco
 #### [Batch Client](/examples/batch-client)
 
 Sends multiple JSON-RPC requests as a batch using `BatchRequest`.
+
+#### [Full Client](/examples/full-client)
+
+Exercises every client-side operation against a real in-process server,
+including `tools/call`, `resources/read` and `prompts/get`, and asserts on
+each response.
 
 ## Running Examples
 
@@ -118,6 +128,9 @@ zig build run-all-examples
 
 # Rate limiter
 ./zig-out/bin/rate-limiter-example
+
+# MCP Apps server
+./zig-out/bin/mcp-app-server
 ```
 
 PowerShell (Windows):
@@ -135,6 +148,7 @@ PowerShell (Windows):
 .\zig-out\bin\shutdown-example.exe
 .\zig-out\bin\validator-example.exe
 .\zig-out\bin\rate-limiter-example.exe
+.\zig-out\bin\mcp-app-server.exe
 ```
 
 ### Run a Client Example
@@ -181,12 +195,17 @@ Add to your Claude Desktop config (usually at `~/.config/claude/config.json`):
 # Discover
 curl -X POST http://127.0.0.1:8080/mcp \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"server/discover"}'
+  -H "MCP-Protocol-Version: 2026-07-28" \
+  -H "Mcp-Method: server/discover" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"test","version":"1.0.0"}}}}'
 
 # Call ping
 curl -X POST http://127.0.0.1:8080/mcp \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"ping","arguments":{"message":"hello"}}}'
+  -H "MCP-Protocol-Version: 2026-07-28" \
+  -H "Mcp-Method: tools/call" \
+  -H "Mcp-Name: ping" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"ping","arguments":{"message":"hello"},"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"test","version":"1.0.0"}}}}'
 ```
 
 ## Project Structure

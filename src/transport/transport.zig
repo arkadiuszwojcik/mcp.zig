@@ -7,6 +7,8 @@
 const std = @import("std");
 
 const jsonrpc = @import("../protocol/jsonrpc.zig");
+const protocol = @import("../protocol/protocol.zig");
+const param_headers = @import("../protocol/param_headers.zig");
 const types = @import("../protocol/types.zig");
 const httpx = @import("httpx");
 
@@ -185,6 +187,126 @@ pub const StdioTransport = struct {
     }
 };
 
+/// Params field mirrored into the `Mcp-Name` header, per method.
+fn nameFieldForMethod(method: []const u8) ?[]const u8 {
+    if (std.mem.eql(u8, method, "tools/call")) return "name";
+    if (std.mem.eql(u8, method, "prompts/get")) return "name";
+    if (std.mem.eql(u8, method, "resources/read")) return "uri";
+    // The tasks extension keys every `tasks/*` request by `taskId`, so the
+    // header carries the task rather than a tool, prompt or resource name.
+    if (std.mem.startsWith(u8, method, "tasks/")) return "taskId";
+    return null;
+}
+
+/// Extracts the value the server will compare `Mcp-Name` against.
+fn methodIdentity(method: []const u8, params: ?std.json.Value) ?[]const u8 {
+    const field = nameFieldForMethod(method) orelse return null;
+    const p = params orelse return null;
+    if (p != .object) return null;
+    const v = p.object.get(field) orelse return null;
+    return if (v == .string) v.string else null;
+}
+
+/// Tool parameter annotations learned from `tools/list`, keyed by tool name.
+///
+/// The spec requires clients to mirror the parameters a server marks with
+/// `x-mcp-header`, and only those. Annotations are cached per tool so a later
+/// `tools/call` can reproduce the same headers without the caller re-supplying
+/// the schema.
+pub const AnnotationCache = struct {
+    entries: std.StringHashMapUnmanaged([]param_headers.Annotation) = .empty,
+    owned_by: std.mem.Allocator,
+
+    pub fn deinit(self: *AnnotationCache) void {
+        var it = self.entries.iterator();
+        while (it.next()) |entry| {
+            param_headers.Annotation.freeList(self.owned_by, entry.value_ptr.*);
+            self.owned_by.free(entry.key_ptr.*);
+        }
+        self.entries.deinit(self.owned_by);
+    }
+};
+
+/// Records the annotations declared by a tool's `inputSchema`.
+///
+/// Returns the annotation list when the definition is conforming. A
+/// non-conforming definition is reported as an error; the caller should then
+/// exclude that tool from `tools/list` results.
+pub fn registerToolAnnotations(
+    cache: *AnnotationCache,
+    allocator: std.mem.Allocator,
+    tool_name: []const u8,
+    input_schema: std.json.Value,
+) ![]param_headers.Annotation {
+    const list = try param_headers.collect(allocator, input_schema);
+
+    if (cache.entries.getPtr(tool_name)) |existing| {
+        param_headers.Annotation.freeList(allocator, existing.*);
+        existing.* = list;
+    } else {
+        const key = try allocator.dupe(u8, tool_name);
+        errdefer allocator.free(key);
+        try cache.entries.put(allocator, key, list);
+    }
+    return list;
+}
+
+/// Registers every tool in a parsed `tools/list` result.
+///
+/// Returns the names of tools whose `inputSchema` violates the annotation
+/// constraints. Conforming clients must exclude those tools from the list they
+/// present, but may keep using the remaining ones. The caller owns the
+/// returned slice and each name in it.
+pub fn registerToolAnnotationsFromList(
+    cache: *AnnotationCache,
+    allocator: std.mem.Allocator,
+    tools: std.json.Value,
+) ![]const []const u8 {
+    var rejected: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (rejected.items) |name| allocator.free(name);
+        rejected.deinit(allocator);
+    }
+
+    if (tools != .array) return rejected.toOwnedSlice(allocator);
+
+    for (tools.array.items) |tool| {
+        if (tool != .object) continue;
+        const name_value = tool.object.get("name") orelse continue;
+        if (name_value != .string) continue;
+        const schema = tool.object.get("inputSchema") orelse continue;
+
+        _ = registerToolAnnotations(cache, allocator, name_value.string, schema) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => {
+                try rejected.append(allocator, try allocator.dupe(u8, name_value.string));
+                continue;
+            },
+        };
+    }
+
+    return rejected.toOwnedSlice(allocator);
+}
+
+/// Emits the `Mcp-Param-{Name}` headers a `tools/call` body declares.
+pub fn appendParamHeaders(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(httpx.Header),
+    cache: *const AnnotationCache,
+    params: std.json.ObjectMap,
+) !void {
+    // Annotations are only defined for tool parameters, so the header names
+    // come from the tool's schema rather than from the params object.
+    const name_value = params.get("name") orelse return;
+    if (name_value != .string) return;
+    const annotations = cache.entries.get(name_value.string) orelse return;
+
+    const arguments = params.get("arguments") orelse return;
+    if (arguments != .object) return;
+
+    try param_headers.appendHeaders(allocator, out, annotations, arguments);
+}
+
 /// HTTP transport for remote server communication using httpx.zig.
 /// Sends requests via HTTP POST and receives JSON or SSE responses.
 /// Stateless per-request model (MCP 2026-07-28).
@@ -196,6 +318,8 @@ pub const HttpTransport = struct {
     client_capabilities: ?types.ClientCapabilities = null,
     is_closed: bool = false,
     pending_responses: std.ArrayList([]const u8) = .empty,
+    /// `x-mcp-header` annotations discovered from `tools/list`.
+    annotations: AnnotationCache = .{ .owned_by = undefined },
 
     const Self = @This();
 
@@ -205,6 +329,7 @@ pub const HttpTransport = struct {
         return .{
             .endpoint = owned_endpoint,
             .pending_responses = .empty,
+            .annotations = .{ .owned_by = allocator },
         };
     }
 
@@ -237,7 +362,39 @@ pub const HttpTransport = struct {
 
         try headers.append(allocator, .{ .name = "Content-Type", .value = "application/json" });
         try headers.append(allocator, .{ .name = "Accept", .value = "application/json, text/event-stream" });
-        try headers.append(allocator, .{ .name = "MCP-Protocol-Version", .value = self.protocol_version });
+        try headers.append(allocator, .{ .name = protocol.HEADER_PROTOCOL_VERSION, .value = self.protocol_version });
+
+        // Mirror the body fields the spec requires servers to validate.
+        // `Mcp-Method` is always required; `Mcp-Name` is required for the
+        // methods whose identity lives in `params.name` / `params.uri`.
+        {
+            var arena = std.heap.ArenaAllocator.init(allocator);
+            defer arena.deinit();
+
+            if (jsonrpc.parseMessage(arena.allocator(), message)) |parsed| {
+                switch (parsed.message) {
+                    .request => |req| {
+                        const method_hdr = try protocol.encodeHeaderValue(allocator, req.method);
+                        defer allocator.free(method_hdr);
+                        try headers.append(allocator, .{ .name = protocol.HEADER_METHOD, .value = method_hdr });
+
+                        if (methodIdentity(req.method, req.params)) |ident| {
+                            const name_hdr = try protocol.encodeHeaderValue(allocator, ident);
+                            defer allocator.free(name_hdr);
+                            try headers.append(allocator, .{ .name = protocol.HEADER_NAME, .value = name_hdr });
+                        }
+
+                        if (req.params) |p| {
+                            if (p == .object) try appendParamHeaders(allocator, &headers, &self.annotations, p.object);
+                        }
+                    },
+                    .notification, .response, .error_response => {},
+                }
+            } else |_| {
+                // Unparseable messages are forwarded as-is; the server reports
+                // the -32700 rather than the transport silently dropping them.
+            }
+        }
 
         var bearer_buf: ?[]u8 = null;
         defer if (bearer_buf) |b| allocator.free(b);
@@ -252,7 +409,17 @@ pub const HttpTransport = struct {
         defer if (client_info_buf) |b| allocator.free(b);
 
         if (self.client_info) |ci| {
-            client_info_buf = try std.fmt.allocPrint(allocator, "{{\"name\":\"{s}\",\"version\":\"{s}\"}}", .{ ci.name, ci.version });
+            // Serialised with std.json so names containing quotes, backslashes
+            // or control characters cannot corrupt the header or the JSON.
+            const ClientInfo = struct { name: []const u8, version: []const u8 };
+            var aw: std.Io.Writer.Allocating = .init(allocator);
+            defer aw.deinit();
+            try std.json.Stringify.value(
+                ClientInfo{ .name = ci.name, .version = ci.version },
+                .{},
+                &aw.writer,
+            );
+            client_info_buf = try allocator.dupe(u8, aw.written());
             try headers.append(allocator, .{ .name = "io.modelcontextprotocol/clientInfo", .value = client_info_buf.? });
         }
 
@@ -473,4 +640,72 @@ test "HttpTransport SSE data framing enqueues payloads" {
     try transport_impl.enqueueSseEvents(allocator, "data: {\"a\":1}\n\n");
     try std.testing.expectEqual(@as(usize, 1), transport_impl.pending_responses.items.len);
     try std.testing.expectEqualStrings("{\"a\":1}", transport_impl.pending_responses.items[0]);
+}
+
+test "nameFieldForMethod mirrors the spec's Mcp-Name rules" {
+    try std.testing.expectEqualStrings("name", nameFieldForMethod("tools/call").?);
+    try std.testing.expectEqualStrings("name", nameFieldForMethod("prompts/get").?);
+    try std.testing.expectEqualStrings("uri", nameFieldForMethod("resources/read").?);
+    try std.testing.expect(nameFieldForMethod("tools/list") == null);
+    try std.testing.expect(nameFieldForMethod("server/discover") == null);
+}
+
+test "methodIdentity extracts the field the server compares Mcp-Name against" {
+    const allocator = std.testing.allocator;
+
+    const tool_args = try std.json.parseFromSlice(std.json.Value, allocator,
+        \\{"name":"greet"}
+    , .{});
+    defer tool_args.deinit();
+    try std.testing.expectEqualStrings("greet", methodIdentity("tools/call", tool_args.value).?);
+
+    const read_args = try std.json.parseFromSlice(std.json.Value, allocator,
+        \\{"uri":"file:///a.txt"}
+    , .{});
+    defer read_args.deinit();
+    try std.testing.expectEqualStrings("file:///a.txt", methodIdentity("resources/read", read_args.value).?);
+
+    // Methods without an identity field produce no header value.
+    try std.testing.expect(methodIdentity("tools/list", read_args.value) == null);
+    try std.testing.expect(methodIdentity("tools/call", null) == null);
+}
+
+test "isHeaderSafe accepts printable ASCII only" {
+    try std.testing.expect(protocol.isHeaderSafe("tools/call"));
+    try std.testing.expect(protocol.isHeaderSafe("file:///project/config.json"));
+    try std.testing.expect(!protocol.isHeaderSafe("bad\nvalue"));
+    try std.testing.expect(!protocol.isHeaderSafe("caf\u{00e9}"));
+    try std.testing.expect(!protocol.isHeaderSafe(""));
+}
+
+test "encodeHeaderValue passes safe values through and sentencils the rest" {
+    const allocator = std.testing.allocator;
+
+    const safe = try protocol.encodeHeaderValue(allocator, "resources/read");
+    defer allocator.free(safe);
+    try std.testing.expectEqualStrings("resources/read", safe);
+
+    const uri = "file:///caf\u{00e9}/\u{4e16}\u{754c}.txt";
+    const encoded = try protocol.encodeHeaderValue(allocator, uri);
+    defer allocator.free(encoded);
+
+    try std.testing.expect(std.mem.startsWith(u8, encoded, protocol.SENTINEL_PREFIX));
+    try std.testing.expect(std.mem.endsWith(u8, encoded, "?="));
+
+    // The server decodes this form, so it must round-trip to the exact bytes.
+    const decoded = (try protocol.decodeSentinel(allocator, encoded)).?;
+    defer allocator.free(decoded);
+    try std.testing.expectEqualStrings(uri, decoded);
+}
+
+test "base64Alloc matches std.base64 encoding" {
+    const allocator = std.testing.allocator;
+    const input = "mcp.zig";
+
+    const got = try protocol.base64Alloc(allocator, input);
+    defer allocator.free(got);
+
+    var expected_buf: [64]u8 = undefined;
+    const expected = std.base64.standard.Encoder.encode(&expected_buf, input);
+    try std.testing.expectEqualStrings(expected, got);
 }

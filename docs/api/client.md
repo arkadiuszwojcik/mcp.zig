@@ -56,14 +56,18 @@ Clean up client resources and pending state.
 ## Capabilities
 
 ```zig
-pub fn enableRoots(self: *Client, listChanged: bool) void
+pub fn enableRoots(self: *Client) void
 pub fn enableSampling(self: *Client) void
 pub fn enableSamplingAdvanced(self: *Client, context: bool, tools_support: bool) void
 pub fn enableElicitation(self: *Client) void
 pub fn enableElicitationForm(self: *Client) void
 pub fn enableElicitationUrl(self: *Client) void
-pub fn enableTasks(self: *Client) void
-pub fn enableTasksAdvanced(self: *Client, sampling: bool, elicitation: bool) void
+pub fn enableTasks(self: *Client) !void      // declares the io.modelcontextprotocol/tasks extension
+pub fn enableUi(self: *Client) !void         // declares the io.modelcontextprotocol/ui extension
+pub fn enableUiWithSettings(self: *Client, settings: std.json.Value) !void
+pub fn enableExtension(self: *Client, label: []const u8) !void
+pub fn hasServerUi(self: *Client) bool
+pub fn hasServerTasks(self: *Client) bool
 ```
 
 ---
@@ -76,17 +80,44 @@ pub fn addRoot(self: *Client, uri: []const u8, name: ?[]const u8) !void
 
 ---
 
-## Connection Management
+## Connection & Authorization Management
 
 ```zig
 pub fn connectStdio(self: *Client, command: []const u8, args: []const []const u8) !void
 pub fn connectHttp(self: *Client, url: []const u8) !void
 pub fn setAuthorizationToken(self: *Client, token: []const u8) !void
+pub fn authenticateWithClientCredentials(
+    self: *Client,
+    token_endpoint: []const u8,
+    client_id: []const u8,
+    client_secret: []const u8,
+    scope: ?[]const u8,
+) !void
+pub fn authenticateWithClientCredentialsResource(
+    self: *Client,
+    token_endpoint: []const u8,
+    client_id: []const u8,
+    client_secret: []const u8,
+    scope: ?[]const u8,
+    resource: ?[]const u8,
+) !void
+pub fn discoverProtectedResource(
+    self: *Client,
+    resource_metadata_url: []const u8,
+) !mcp.auth.ProtectedResourceMetadata
+pub fn discoverProtectedResourceEndpoint(
+    self: *Client,
+    mcp_endpoint_url: []const u8,
+    www_authenticate_header: ?[]const u8,
+) !mcp.auth.ProtectedResourceMetadata
+pub fn discoverAuthorizationServer(
+    self: *Client,
+    issuer_url: []const u8,
+) !mcp.auth.AuthorizationServerMetadata
 pub fn disconnect(self: *Client) void
 ```
 
-`connectHttp` expects the full MCP endpoint URL, e.g.
-`http://127.0.0.1:8080/mcp` (server exposes `POST /mcp`).
+`connectHttp` expects the full MCP endpoint URL, e.g. `http://127.0.0.1:8080/mcp` (server exposes `POST /mcp`).
 
 ---
 
@@ -112,10 +143,7 @@ pub fn complete(self: *Client, ref: std.json.Value, argument: std.json.Value) !v
 
 pub fn getTask(self: *Client, taskId: []const u8) !void
 pub fn getTaskResult(self: *Client, taskId: []const u8) !void
-pub fn listTasks(self: *Client) !void
 pub fn cancelTask(self: *Client, taskId: []const u8) !void
-
-pub fn notifyRootsChanged(self: *Client) !void
 ```
 
 ---
@@ -137,7 +165,7 @@ fn run(io: std.Io, allocator: std.mem.Allocator) !void {
     });
     defer client.deinit();
 
-    client.enableRoots(true);
+    client.enableRoots();
     client.enableSamplingAdvanced(true, true);
 
     try client.addRoot("file:///home/user/docs", "Documentation");

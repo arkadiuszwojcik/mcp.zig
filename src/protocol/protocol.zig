@@ -12,15 +12,30 @@ const types = @import("types.zig");
 pub const JsonRpc = jsonrpc;
 pub const Types = types;
 
-/// Current MCP protocol version supported by this library.
+/// `x-mcp-header` annotation handling and `Mcp-Param-*` emission.
+pub const ParamHeaders = @import("param_headers.zig");
+
+/// Current MCP protocol version supported by this library (latest active revision).
 pub const PROTOCOL_VERSION = "2026-07-28";
 
 /// Legacy alias for compatibility.
 pub const VERSION = PROTOCOL_VERSION;
 
-/// List of all MCP protocol versions this library can communicate with.
+/// List of MCP protocol versions actively supported by this library.
+///
+/// Under MCP 2026-07-28, servers advertise only the protocol versions they can
+/// actually serve in `server/discover`. Because this library implements the stateless
+/// 2026-07-28 flow without legacy session-handshake fallback, only `2026-07-28` is listed.
 pub const SUPPORTED_VERSIONS = [_][]const u8{
-    "2026-07-28",
+    PROTOCOL_VERSION,
+};
+
+/// Deprecated historical MCP protocol versions that are not supported.
+///
+/// These older revisions relied on stateful session establishment with an `initialize`
+/// handshake, `ping`, and session-bound lifecycle methods that were removed in 2026-07-28.
+/// Requests targeting these versions cannot be served.
+pub const DEPRECATED_VERSIONS = [_][]const u8{
     "2025-11-25",
     "2025-06-18",
     "2025-03-26",
@@ -29,6 +44,174 @@ pub const SUPPORTED_VERSIONS = [_][]const u8{
 
 /// JSON-RPC version used by MCP.
 pub const JSONRPC_VERSION = "2.0";
+
+/// `_meta` key carrying server identity in results (MCP 2026-07-28).
+/// Servers SHOULD populate this on `server/discover` results.
+pub const META_SERVER_INFO = "io.modelcontextprotocol/serverInfo";
+
+/// `_meta` key carrying the protocol version on requests.
+pub const META_PROTOCOL_VERSION = "io.modelcontextprotocol/protocolVersion";
+
+/// `_meta` key carrying client identity on requests.
+pub const META_CLIENT_INFO = "io.modelcontextprotocol/clientInfo";
+
+/// `_meta` key carrying client capabilities on requests.
+pub const META_CLIENT_CAPABILITIES = "io.modelcontextprotocol/clientCapabilities";
+
+/// Default freshness hint (ms) emitted on cacheable list/read results.
+/// Servers MUST emit a `ttlMs` >= 0; this default keeps results fresh for
+/// five minutes unless configured otherwise.
+pub const DEFAULT_CACHE_TTL_MS: i64 = 300_000;
+
+/// Default `ttlMs` for `resources/read`, which frequently returns
+/// authorization- or request-specific data.
+pub const DEFAULT_RESOURCE_READ_TTL_MS: i64 = 60_000;
+
+/// `resultType` value for a fully-satisfied request.
+pub const RESULT_TYPE_COMPLETE = "complete";
+
+/// `resultType` value for a request awaiting client-supplied input (MRTR).
+pub const RESULT_TYPE_INPUT_REQUIRED = "input_required";
+
+/// `resultType` value for a request bound to an extension task.
+pub const RESULT_TYPE_TASK = "task";
+
+/// `_meta` key carrying the JSON-RPC id of the originating
+/// `subscriptions/listen` request on every subscription notification.
+pub const META_SUBSCRIPTION_ID = "io.modelcontextprotocol/subscriptionId";
+
+/// Extension label for the tasks extension (`io.modelcontextprotocol/tasks`).
+pub const EXTENSION_TASKS = "io.modelcontextprotocol/tasks";
+
+/// Extension label for the UI (MCP Apps) extension (`io.modelcontextprotocol/ui`).
+pub const EXTENSION_UI = "io.modelcontextprotocol/ui";
+
+/// MIME type for MCP Apps HTML application bundles.
+pub const MIME_TYPE_MCP_APP = "text/html;profile=mcp-app";
+
+/// URI scheme prefix for MCP Apps UI resources (`ui://`).
+pub const URI_SCHEME_UI = "ui://";
+
+/// `_meta` key carrying an opaque server-side MRTR state blob.
+pub const META_REQUEST_STATE = "io.modelcontextprotocol/requestState";
+
+/// Per-request log level. A client sets this in `_meta` to ask the server for
+/// `notifications/message` on that request's response stream; the server must
+/// emit nothing when it is absent.
+pub const META_LOG_LEVEL = "io.modelcontextprotocol/logLevel";
+
+/// `_meta` key with which a client augments a request to have it executed as a
+/// task. The value is a `TaskMetadata` object, currently `{ "ttl": <ms> }`.
+pub const META_TASK = "io.modelcontextprotocol/task";
+
+/// `_meta` key relating a result or notification to the task that produced it,
+/// carrying a `RelatedTaskMetadata` object, i.e. `{ "taskId": "..." }`.
+pub const META_RELATED_TASK = "io.modelcontextprotocol/relatedTask";
+
+/// Server-to-client requests a server MAY embed in MRTR `inputRequests`.
+pub const MRTR_METHOD_ELICITATION = "elicitation/create";
+pub const MRTR_METHOD_SAMPLING = "sampling/createMessage";
+pub const MRTR_METHOD_ROOTS = "roots/list";
+
+// Streamable HTTP wire format
+//
+// These names are shared by both ends of the connection: the client emits
+// them in transport.zig and the server validates them in server/http_rules.zig.
+// They live here so the two can never drift apart.
+
+/// Carries the negotiated protocol version; must match
+/// `_meta["io.modelcontextprotocol/protocolVersion"]`.
+pub const HEADER_PROTOCOL_VERSION = "MCP-Protocol-Version";
+/// Mirrors the JSON-RPC `method`.
+pub const HEADER_METHOD = "Mcp-Method";
+/// Mirrors `params.name` or `params.uri` where the method has an identity.
+pub const HEADER_NAME = "Mcp-Name";
+/// Prefix for the per-parameter mirroring headers.
+pub const HEADER_PARAM_PREFIX = "Mcp-Param-";
+
+/// Wrapper used for header values that are not safe to send verbatim.
+pub const SENTINEL_PREFIX = "=?base64?";
+pub const SENTINEL_SUFFIX = "?=";
+
+/// True when `value` can be placed in an HTTP header verbatim.
+///
+/// RFC 9110 limits a field value to visible ASCII, space and horizontal tab.
+/// Leading or trailing whitespace is also rejected, because such a value must
+/// be sentinel-encoded instead of sent in a form intermediaries may trim.
+pub fn isHeaderSafe(value: []const u8) bool {
+    // An empty header value conveys nothing and is not a valid one.
+    if (value.len == 0) return false;
+
+    const first = value[0];
+    const last = value[value.len - 1];
+    if (first == ' ' or first == '\t' or last == ' ' or last == '\t') return false;
+
+    for (value) |ch| {
+        const ok = std.ascii.isPrint(ch) or ch == '\t';
+        if (!ok) return false;
+    }
+    return true;
+}
+
+/// Base64-encodes `value` into a freshly allocated buffer.
+///
+/// `std.base64.Encoder` exposes `encode`/`calcSize` rather than an allocating
+/// convenience, so the buffer is sized and filled here.
+pub fn base64Alloc(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
+    const encoder = std.base64.standard.Encoder;
+    const buf = try allocator.alloc(u8, encoder.calcSize(value.len));
+    _ = encoder.encode(buf, value);
+    return buf;
+}
+
+/// Encodes a header value, falling back to the spec's base64 sentinel
+/// (`=?base64?<base64>?=`) when the raw value is not header-safe.
+pub fn encodeHeaderValue(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
+    if (isHeaderSafe(value)) return allocator.dupe(u8, value);
+
+    const b64 = try base64Alloc(allocator, value);
+    defer allocator.free(b64);
+    return std.fmt.allocPrint(allocator, SENTINEL_PREFIX ++ "{s}" ++ SENTINEL_SUFFIX, .{b64});
+}
+
+/// Decodes a value produced by `encodeHeaderValue`.
+///
+/// Returns null when `value` is not sentinel-encoded. The caller owns the
+/// returned slice when it is non-null.
+pub fn decodeSentinel(allocator: std.mem.Allocator, value: []const u8) !?[]u8 {
+    if (!std.mem.startsWith(u8, value, SENTINEL_PREFIX)) return null;
+    if (!std.mem.endsWith(u8, value, SENTINEL_SUFFIX)) return null;
+    if (value.len <= SENTINEL_PREFIX.len + SENTINEL_SUFFIX.len) return null;
+
+    const payload = value[SENTINEL_PREFIX.len .. value.len - SENTINEL_SUFFIX.len];
+    const decoder = std.base64.standard.Decoder;
+    const size = decoder.calcSizeForSlice(payload) catch return error.InvalidSentinel;
+    const buf = try allocator.alloc(u8, size);
+    errdefer allocator.free(buf);
+    decoder.decode(buf, payload) catch return error.InvalidSentinel;
+    return buf;
+}
+
+/// Returns true when `version` is actively supported by this library.
+pub fn supportsVersion(version: []const u8) bool {
+    for (SUPPORTED_VERSIONS) |v| {
+        if (std.mem.eql(u8, v, version)) return true;
+    }
+    return false;
+}
+
+/// Returns true when `version` is a deprecated historical MCP revision (earlier than 2026-07-28).
+pub fn isDeprecatedVersion(version: []const u8) bool {
+    for (DEPRECATED_VERSIONS) |v| {
+        if (std.mem.eql(u8, v, version)) return true;
+    }
+    return false;
+}
+
+/// Returns true when `version` is recognized either as currently supported or as a deprecated revision.
+pub fn isKnownVersion(version: []const u8) bool {
+    return supportsVersion(version) or isDeprecatedVersion(version);
+}
 
 /// All MCP method names as defined in the 2026-07-28 protocol specification.
 pub const Method = enum {
@@ -66,9 +249,8 @@ pub const Method = enum {
     @"elicitation/create",
     @"notifications/elicitation/complete",
 
-    // Roots (deprecated)
+    // Roots (deprecated; list_changed was removed in 2026-07-28)
     @"roots/list",
-    @"notifications/roots/list_changed",
 
     // Completion
     @"completion/complete",
@@ -79,10 +261,9 @@ pub const Method = enum {
 
     // Tasks
     @"tasks/get",
-    @"tasks/result",
-    @"tasks/list",
+    @"tasks/update",
     @"tasks/cancel",
-    @"notifications/tasks/status",
+    @"notifications/tasks",
 
     /// Returns the string representation of the method name.
     pub fn toString(self: Method) []const u8 {
@@ -163,8 +344,10 @@ pub const ToolCallResult = struct {
     isError: ?bool = null,
     /// Whether more input is required from the client (MRTR).
     resultType: ?types.ResultType = null,
-    /// Input requests when resultType is "input_required".
-    inputRequests: ?[]const types.InputRequest = null,
+    /// Server-assigned map of requests the client must fulfill before retrying.
+    inputRequests: ?types.InputRequests = null,
+    /// Opaque server state echoed back verbatim by the client on retry (MRTR).
+    requestState: ?[]const u8 = null,
 };
 
 /// Result of listing available resources.
@@ -199,13 +382,13 @@ pub const ResourceTemplatesListResult = struct {
     ttlMs: ?u64 = null,
 };
 
-/// Parameters for subscribing to resource updates via subscriptions/listen.
+/// Parameters for opening a notification stream via `subscriptions/listen`.
+///
+/// The `notifications` filter selects which notification types the client
+/// wants; the server MUST NOT send any type the client did not request.
 pub const SubscriptionListenParams = struct {
     _meta: ?std.json.Value = null,
-    /// URI pattern to subscribe to (exact or glob).
-    uri: []const u8,
-    /// Optional notification filter.
-    filter: ?types.SubscriptionFilter = null,
+    notifications: types.SubscriptionFilter = .{},
 };
 
 /// Parameters for resource updated notification.
@@ -365,29 +548,17 @@ pub const GetTaskResult = struct {
     pollInterval: ?i64 = null,
 };
 
-/// Parameters for tasks/result request.
-pub const GetTaskPayloadParams = struct {
+/// Parameters for `tasks/update`: client-to-server input for a running task.
+pub const UpdateTaskParams = struct {
     taskId: []const u8,
+    /// Application-defined input for the task.
+    update: ?std.json.Value = null,
 };
 
-/// Result of tasks/result — structure matches the result type of the original request.
-pub const GetTaskPayloadResult = struct {
-    _meta: ?std.json.Value = null,
-};
+/// Result of `tasks/update` — returns Result fields merged with Task fields.
+pub const UpdateTaskResult = GetTaskResult;
 
-/// Parameters for tasks/list request (paginated).
-pub const ListTasksParams = struct {
-    cursor: ?types.Cursor = null,
-};
-
-/// Result of tasks/list.
-pub const ListTasksResult = struct {
-    _meta: ?std.json.Value = null,
-    nextCursor: ?[]const u8 = null,
-    tasks: []const types.Task,
-};
-
-/// Parameters for tasks/cancel request.
+/// Parameters for `tasks/cancel` request.
 pub const CancelTaskParams = struct {
     taskId: []const u8,
 };
@@ -395,7 +566,7 @@ pub const CancelTaskParams = struct {
 /// Result of tasks/cancel — returns Result fields merged with Task fields.
 pub const CancelTaskResult = GetTaskResult;
 
-/// Parameters for notifications/tasks/status notification.
+/// Parameters for a notifications/tasks status notification.
 pub const TaskStatusNotificationParams = struct {
     _meta: ?std.json.Value = null,
     taskId: []const u8,
@@ -516,10 +687,9 @@ test "Method enum - no ping removed" {
 
 test "Method enum - new task methods" {
     try std.testing.expectEqualStrings("tasks/get", Method.@"tasks/get".toString());
-    try std.testing.expectEqualStrings("tasks/result", Method.@"tasks/result".toString());
-    try std.testing.expectEqualStrings("tasks/list", Method.@"tasks/list".toString());
+    try std.testing.expectEqualStrings("tasks/update", Method.@"tasks/update".toString());
     try std.testing.expectEqualStrings("tasks/cancel", Method.@"tasks/cancel".toString());
-    try std.testing.expectEqualStrings("notifications/tasks/status", Method.@"notifications/tasks/status".toString());
+    try std.testing.expectEqualStrings("notifications/tasks", Method.@"notifications/tasks".toString());
 }
 
 test "Method enum - elicitation complete" {
@@ -529,6 +699,37 @@ test "Method enum - elicitation complete" {
 test "LogLevel enum" {
     try std.testing.expectEqualStrings("debug", LogLevel.debug.toString());
     try std.testing.expectEqualStrings("error", LogLevel.@"error".toString());
+}
+
+test "header safety follows RFC 9110 and the spec's encoding examples" {
+    // Plain ASCII is safe.
+    try std.testing.expect(isHeaderSafe("us-west1"));
+    try std.testing.expect(isHeaderSafe("a b"));
+    try std.testing.expect(isHeaderSafe("a\tb"));
+
+    // Empty values convey nothing.
+    try std.testing.expect(!isHeaderSafe(""));
+
+    // Surrounding whitespace would be trimmed by intermediaries, so the spec
+    // requires it to be sentinel-encoded instead.
+    try std.testing.expect(!isHeaderSafe(" padded "));
+    try std.testing.expect(!isHeaderSafe(" lead"));
+    try std.testing.expect(!isHeaderSafe("trail "));
+
+    // Non-ASCII and control characters are never sent verbatim.
+    try std.testing.expect(!isHeaderSafe("caf\xC3\xA9"));
+    try std.testing.expect(!isHeaderSafe("line1\nline2"));
+    try std.testing.expect(!isHeaderSafe("del\x7f"));
+
+    // " padded " round-trips through the sentinel back to the original.
+    const encoded = try encodeHeaderValue(std.testing.allocator, " padded ");
+    defer std.testing.allocator.free(encoded);
+    try std.testing.expect(std.mem.startsWith(u8, encoded, SENTINEL_PREFIX));
+    try std.testing.expect(std.mem.endsWith(u8, encoded, SENTINEL_SUFFIX));
+
+    const decoded = (try decodeSentinel(std.testing.allocator, encoded)).?;
+    defer std.testing.allocator.free(decoded);
+    try std.testing.expectEqualStrings(" padded ", decoded);
 }
 
 test "Method fromString round-trip (Zig 0.17 @typeInfo migration)" {
@@ -549,4 +750,27 @@ test "Method fromString round-trip (Zig 0.17 @typeInfo migration)" {
     }
     try std.testing.expect(Method.fromString("") == null);
     try std.testing.expect(Method.fromString("tools/unknown") == null);
+}
+
+test "protocol versions and deprecation status" {
+    try std.testing.expect(supportsVersion("2026-07-28"));
+    try std.testing.expect(!supportsVersion("2025-11-25"));
+    try std.testing.expect(!supportsVersion("2025-06-18"));
+    try std.testing.expect(!supportsVersion("2025-03-26"));
+    try std.testing.expect(!supportsVersion("2024-11-05"));
+    try std.testing.expect(!supportsVersion("2023-01-01"));
+
+    try std.testing.expect(!isDeprecatedVersion("2026-07-28"));
+    try std.testing.expect(isDeprecatedVersion("2025-11-25"));
+    try std.testing.expect(isDeprecatedVersion("2025-06-18"));
+    try std.testing.expect(isDeprecatedVersion("2025-03-26"));
+    try std.testing.expect(isDeprecatedVersion("2024-11-05"));
+    try std.testing.expect(!isDeprecatedVersion("2023-01-01"));
+
+    try std.testing.expect(isKnownVersion("2026-07-28"));
+    try std.testing.expect(isKnownVersion("2025-11-25"));
+    try std.testing.expect(isKnownVersion("2025-06-18"));
+    try std.testing.expect(isKnownVersion("2025-03-26"));
+    try std.testing.expect(isKnownVersion("2024-11-05"));
+    try std.testing.expect(!isKnownVersion("2023-01-01"));
 }

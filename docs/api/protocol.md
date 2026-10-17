@@ -23,15 +23,30 @@ The current MCP protocol version.
 
 ```zig
 pub const SUPPORTED_VERSIONS = [_][]const u8{
-    "2026-07-28",
-    "2025-11-25",
-    "2025-06-18",
-    "2025-03-26",
-    "2024-11-05",
+    "2026-07-28", // Supported (default, latest active specification)
 };
 ```
 
-List of supported protocol versions.
+List of MCP protocol versions actively supported and advertised by this library in `server/discover`. Only `2026-07-28` is served; earlier revisions are unsupported and deprecated.
+
+### `protocol.DEPRECATED_VERSIONS`
+
+```zig
+pub const DEPRECATED_VERSIONS = [_][]const u8{
+    "2025-11-25", // Unsupported / Deprecated (session/handshake removed)
+    "2025-06-18", // Unsupported / Deprecated (session/handshake removed)
+    "2025-03-26", // Unsupported / Deprecated (session/handshake removed)
+    "2024-11-05", // Unsupported / Deprecated (initial specification)
+};
+```
+
+| Version    | Status                                                                                  |
+| ---------- | --------------------------------------------------------------------------------------- |
+| 2026-07-28 | Supported (latest, default; the active revision this library speaks and serves)         |
+| 2025-11-25 | Unsupported / Deprecated (older session-based revision; methods removed in 2026-07-28) |
+| 2025-06-18 | Unsupported / Deprecated (older session-based revision; methods removed in 2026-07-28) |
+| 2025-03-26 | Unsupported / Deprecated (older session-based revision; methods removed in 2026-07-28) |
+| 2024-11-05 | Unsupported / Deprecated (initial specification; methods removed in 2026-07-28)        |
 
 ---
 
@@ -299,6 +314,134 @@ HTTP mode details:
   and client info in `_meta`.
 
 ---
+
+## Authorization (`mcp.auth`)
+
+Protocol-level authorization primitives for OAuth 2.0 / 2.1 authentication and resource discovery.
+
+### `parseWwwAuthenticate`
+
+```zig
+pub fn parseWwwAuthenticate(header: []const u8) WwwAuthenticateChallenge
+```
+
+Parses an HTTP `WWW-Authenticate` response challenge header. Extracts `scheme`, `realm`, `resource_metadata`, `scope`, `error`, and `error_description`.
+
+### `fetchProtectedResourceMetadata` & `discoverProtectedResourceMetadata`
+
+```zig
+pub fn fetchProtectedResourceMetadata(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    url: []const u8,
+) !ProtectedResourceMetadata
+
+pub fn discoverProtectedResourceMetadata(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    mcp_endpoint_url: []const u8,
+    www_authenticate_header: ?[]const u8,
+) !ProtectedResourceMetadata
+```
+
+Fetches and discovers RFC 9728 OAuth 2.0 Protected Resource Metadata from challenge headers or automatic well-known URI probing.
+
+### `discoverAuthorizationServerMetadata`
+
+```zig
+pub fn discoverAuthorizationServerMetadata(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    issuer_url: []const u8,
+) !AuthorizationServerMetadata
+```
+
+Probes OAuth 2.0 and OpenID Connect discovery endpoints in priority order and validates the issuer against mix-up attacks (RFC 8414 Section 3.3).
+
+### `requestClientCredentialsToken` & `requestClientCredentialsTokenWithResource`
+
+```zig
+pub fn requestClientCredentialsToken(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    token_endpoint: []const u8,
+    client_id: []const u8,
+    client_secret: []const u8,
+    scope: ?[]const u8,
+) !ClientCredentialsTokenResponse
+
+pub fn requestClientCredentialsTokenWithResource(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    token_endpoint: []const u8,
+    client_id: []const u8,
+    client_secret: []const u8,
+    scope: ?[]const u8,
+    resource: ?[]const u8,
+) !ClientCredentialsTokenResponse
+```
+
+Executes an RFC 6749 Section 4.4 Client Credentials Grant request with optional RFC 8707 Resource Indicators.
+
+### `ClientIdMetadataDocument` (CIMD)
+
+```zig
+pub const ClientIdMetadataDocument = struct {
+    client_id: []const u8,
+    client_name: []const u8,
+    client_uri: ?[]const u8 = null,
+    logo_uri: ?[]const u8 = null,
+    redirect_uris: []const []const u8 = &.{},
+    grant_types: ?[]const []const u8 = null,
+    response_types: ?[]const []const u8 = null,
+    token_endpoint_auth_method: []const u8 = "none",
+
+    pub fn validate(self: ClientIdMetadataDocument) bool;
+    pub fn deinit(self: *ClientIdMetadataDocument, allocator: std.mem.Allocator) void;
+};
+
+pub fn parseClientIdMetadataDocument(allocator: std.mem.Allocator, json_bytes: []const u8) !ClientIdMetadataDocument;
+```
+
+### `generatePkce` & `verifyPkce` (RFC 7636 / OAuth 2.1)
+
+```zig
+pub const PkcePair = struct {
+    verifier: [43]u8,
+    challenge: [43]u8,
+    method: []const u8 = "S256",
+};
+
+pub fn generatePkce(random: std.Random) PkcePair;
+pub fn verifyPkce(verifier: []const u8, expected_challenge: []const u8) bool;
+```
+
+### `validateTokenAudience` (RFC 8707 / RFC 9728)
+
+```zig
+pub fn validateTokenAudience(token_audience: []const u8, expected_resource_uri: []const u8) bool;
+```
+
+Validates inbound token audience claims on the server to prevent token reuse across services.
+
+---
+
+## Cooperative Cancellation (`mcp.CancellationToken`)
+
+Thread-safe atomic cancellation token for cooperative cancellation across tasks, tool handlers, and async workers:
+
+```zig
+pub const CancellationToken = struct {
+    pub fn init() CancellationToken;
+    pub fn cancel(self: *CancellationToken) void;
+    pub fn isCancelled(self: *const CancellationToken) bool;
+    pub fn reset(self: *CancellationToken) void;
+    pub fn check(self: *const CancellationToken) error{Cancelled}!void;
+};
+```
+
+---
+
 
 ## Complete Example
 

@@ -52,6 +52,7 @@ pub fn build(b: *std.Build) void {
     const examples = [_]Example{
         .{ .name = "example-server", .src = "examples/simple_server.zig", .run_step = "run-server", .desc = "Run the simple server example" },
         .{ .name = "example-client", .src = "examples/simple_client.zig", .run_step = "run-client", .desc = "Run the simple client example" },
+        .{ .name = "full-client", .src = "examples/full_client.zig", .run_step = "run-full-client", .desc = "Run the full client/server round-trip example" },
         .{ .name = "weather-server", .src = "examples/weather_server.zig", .run_step = "run-weather", .desc = "Run the weather server example" },
         .{ .name = "calculator-server", .src = "examples/calculator_server.zig", .run_step = "run-calc", .desc = "Run the calculator server example" },
         .{ .name = "advanced-server", .src = "examples/advanced_server.zig", .run_step = "run-advanced", .desc = "Run the advanced server example" },
@@ -64,6 +65,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "health-check-example", .src = "examples/health_check_example.zig", .run_step = "run-health-check", .desc = "Run the health check example" },
         .{ .name = "shutdown-example", .src = "examples/shutdown_example.zig", .run_step = "run-shutdown", .desc = "Run the shutdown example" },
         .{ .name = "validator-example", .src = "examples/validator_example.zig", .run_step = "run-validator", .desc = "Run the validator example" },
+        .{ .name = "mcp-app-server", .src = "examples/mcp_app_server.zig", .run_step = "run-mcp-app", .desc = "Run the MCP Apps server example" },
     };
 
     inline for (examples) |ex| {

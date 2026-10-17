@@ -25,6 +25,20 @@ Important `ServerConfig` fields:
 | `icons` | `?[]const mcp.types.Icon` | Optional icon list |
 | `websiteUrl` | `?[]const u8` | Optional website URL |
 | `instructions` | `?[]const u8` | Optional usage instructions |
+| `cache` | `CacheConfig` | Caching hints for cacheable results |
+
+### `CacheConfig`
+
+Servers MUST emit `ttlMs` (>= 0) and `cacheScope` on `resultType: "complete"` results for `server/discover`, `tools/list`, `prompts/list`, `resources/list`, `resources/templates/list`, and `resources/read`.
+
+| Field | Type | Default | Description |
+| --- | --- | --- | --- |
+| `ttl_ms` | `i64` | `300000` | Freshness hint in ms for lists and `server/discover`; negatives clamp to `0` |
+| `read_ttl_ms` | `i64` | `60000` | Freshness hint for `resources/read` |
+| `scope` | `types.CacheScope` | `.public` | Cache scope for lists and `server/discover` |
+| `read_scope` | `types.CacheScope` | `.private` | Cache scope for `resources/read` |
+
+`types.CacheScope` is either `.public` (no user-specific data) or `.private` (must not be shared across authorization contexts).
 
 ## Lifecycle
 
@@ -53,12 +67,16 @@ pub fn addResourceTemplate(self: *Server, template: mcp.resources.ResourceTempla
 pub fn addPrompt(self: *Server, prompt: mcp.prompts.Prompt) !void
 ```
 
-## Capability Toggles
+## Capability & Extension Toggles
 
 ```zig
 pub fn enableLogging(self: *Server) void
 pub fn enableCompletions(self: *Server) void
-pub fn enableTasks(self: *Server) void
+pub fn enableTasks(self: *Server) !void
+pub fn enableUi(self: *Server) !void
+pub fn enableUiWithSettings(self: *Server, settings: std.json.Value) !void
+pub fn isUiEnabled(self: *Server) bool
+pub fn isTasksEnabled(self: *Server) bool
 ```
 
 Tools/resources/prompts capabilities are advertised automatically once components are registered.
@@ -75,6 +93,16 @@ pub fn notifyResourcesChanged(self: *Server, io: std.Io, allocator: std.mem.Allo
 pub fn notifyResourceUpdated(self: *Server, io: std.Io, allocator: std.mem.Allocator, uri: []const u8) !void
 pub fn notifyPromptsChanged(self: *Server, io: std.Io, allocator: std.mem.Allocator) !void
 ```
+
+::: warning Log level is per-request
+Logging is opt-in per request. A client asks for logs by putting
+`io.modelcontextprotocol/logLevel` in that request's `_meta`, and the server
+emits **nothing** when the field is absent. `sendLogMessage` therefore only
+delivers while the request that asked for logs is still being handled, and a
+message below the requested level is dropped. An unrecognized level fails the
+request with `-32602`. The connection-wide `logging/setLevel` method was removed
+in 2026-07-28.
+:::
 
 ## Minimal Example
 

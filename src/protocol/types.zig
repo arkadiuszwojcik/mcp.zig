@@ -77,6 +77,11 @@ pub const LoggingLevel = enum {
     pub fn toString(self: LoggingLevel) []const u8 {
         return @tagName(self);
     }
+
+    /// Parses an RFC 5424 severity name, returning null when unrecognized.
+    pub fn fromString(value: []const u8) ?LoggingLevel {
+        return std.meta.stringToEnum(LoggingLevel, value);
+    }
 };
 
 /// Optional annotations for the client. The client can use annotations to
@@ -128,7 +133,10 @@ pub const ServerCapabilities = struct {
     prompts: ?PromptsCapability = null,
     resources: ?ResourcesCapability = null,
     tools: ?ToolsCapability = null,
-    tasks: ?ServerTasksCapability = null,
+    /// Extension labels this server supports. The tasks extension, for
+    /// example, is declared as `io.modelcontextprotocol/tasks`; a client
+    /// negotiates it by seeing the label listed here.
+    extensions: ?std.json.Value = null,
 };
 
 pub const LoggingCapability = struct {};
@@ -147,29 +155,81 @@ pub const ToolsCapability = struct {
     listChanged: bool = false,
 };
 
-/// Server-side task capabilities.
-pub const ServerTasksCapability = struct {
-    list: ?struct {} = null,
-    cancel: ?struct {} = null,
-    requests: ?struct {
-        tools: ?struct {
-            call: ?struct {} = null,
-        } = null,
-    } = null,
-};
-
-/// Client capabilities advertised during initialization.
+/// Client capabilities advertised on every request in `_meta`.
 pub const ClientCapabilities = struct {
     experimental: ?std.json.Value = null,
     roots: ?RootsCapability = null,
     sampling: ?SamplingCapability = null,
     elicitation: ?ElicitationCapability = null,
-    tasks: ?ClientTasksCapability = null,
+    /// Extension labels this client supports, serialised into
+    /// `_meta.clientCapabilities.extensions` on every request.
+    extensions: ?std.json.Value = null,
+
+    /// Serialises the declared capabilities for
+    /// `_meta["io.modelcontextprotocol/clientCapabilities"]`, which the spec
+    /// requires on every client request. Only capabilities actually declared
+    /// are emitted, so a server never assumes support the client lacks.
+    ///
+    /// Call this with a per-request arena: nested capability objects (the
+    /// elicitation mode map) are separate allocations that the returned map
+    /// references but does not own, so freeing the outer map alone leaves them
+    /// behind.
+    pub fn toJson(self: ClientCapabilities, allocator: std.mem.Allocator) !std.json.ObjectMap {
+        var caps: std.json.ObjectMap = .empty;
+        errdefer caps.deinit(allocator);
+
+        // Marks a sub-capability present as an empty JSON object.
+        const empty_obj: std.json.ObjectMap = .empty;
+
+        if (self.roots) |roots| {
+            _ = roots;
+            try caps.put(allocator, "roots", .{ .object = empty_obj });
+        }
+        if (self.sampling) |sampling| {
+            var obj: std.json.ObjectMap = .empty;
+            if (sampling.context != null) try obj.put(allocator, "context", .{ .object = empty_obj });
+            if (sampling.tools != null) try obj.put(allocator, "tools", .{ .object = empty_obj });
+            try caps.put(allocator, "sampling", .{ .object = obj });
+        }
+        if (self.elicitation) |elicitation| {
+            // The declared modes must be named: an empty object only means
+            // "form" for backwards compatibility, so a client supporting URL
+            // mode has to say so or servers must not send URL elicitations.
+            var modes: std.json.ObjectMap = .empty;
+            if (elicitation.form != null) try modes.put(allocator, "form", .{ .object = empty_obj });
+            if (elicitation.url != null) try modes.put(allocator, "url", .{ .object = empty_obj });
+            // A client must declare at least one mode; form is the safe default.
+            if (modes.count() == 0) try modes.put(allocator, "form", .{ .object = empty_obj });
+            try caps.put(allocator, "elicitation", .{ .object = modes });
+        }
+        if (self.experimental) |exp| {
+            try caps.put(allocator, "experimental", exp);
+        }
+        if (self.extensions) |ext| {
+            try caps.put(allocator, "extensions", ext);
+        }
+        return caps;
+    }
+
+    /// Frees the nested and top-level ObjectMaps allocated by `toJson`.
+    pub fn freeJson(caps: *std.json.ObjectMap, allocator: std.mem.Allocator) void {
+        if (caps.getPtr("sampling")) |sampling| {
+            if (sampling.* == .object) {
+                sampling.object.deinit(allocator);
+            }
+        }
+        if (caps.getPtr("elicitation")) |elicitation| {
+            if (elicitation.* == .object) {
+                elicitation.object.deinit(allocator);
+            }
+        }
+        caps.deinit(allocator);
+    }
 };
 
-pub const RootsCapability = struct {
-    listChanged: bool = false,
-};
+/// `roots` carries no properties: `notifications/roots/list_changed` was
+/// removed in 2026-07-28, so the capability is presence-only.
+pub const RootsCapability = struct {};
 
 pub const SamplingCapability = struct {
     /// Whether the client supports context inclusion.
@@ -181,20 +241,6 @@ pub const SamplingCapability = struct {
 pub const ElicitationCapability = struct {
     form: ?struct {} = null,
     url: ?struct {} = null,
-};
-
-/// Client-side task capabilities.
-pub const ClientTasksCapability = struct {
-    list: ?struct {} = null,
-    cancel: ?struct {} = null,
-    requests: ?struct {
-        sampling: ?struct {
-            createMessage: ?struct {} = null,
-        } = null,
-        elicitation: ?struct {
-            create: ?struct {} = null,
-        } = null,
-    } = null,
 };
 
 /// Action for an elicitation response.
@@ -330,11 +376,169 @@ pub const SamplingMessageContentBlock = union(enum) {
     tool_result: ToolResultContent,
 };
 
+/// Tool selection mode for sampling requests.
+pub const ToolChoiceMode = enum {
+    /// The model must not use any tools.
+    none,
+    /// The model must use at least one tool before completing.
+    required,
+    /// The model decides. Default.
+    auto,
+
+    pub fn toString(self: ToolChoiceMode) []const u8 {
+        return @tagName(self);
+    }
+};
+
 /// Controls tool selection behavior for sampling requests.
 pub const ToolChoice = struct {
-    /// "none" | "required" | "auto"
-    mode: ?[]const u8 = null,
+    mode: ?ToolChoiceMode = null,
 };
+
+/// Content of a sampling message: either one block or an array of blocks.
+///
+/// The spec permits both. A single block carries the common case of exactly
+/// one content item; an array is required as soon as there is more than one,
+/// which is the normal shape for parallel tool uses and for tool results.
+pub const SamplingContent = union(enum) {
+    single: SamplingMessageContentBlock,
+    many: []const SamplingMessageContentBlock,
+
+    pub fn one(block: SamplingMessageContentBlock) SamplingContent {
+        return .{ .single = block };
+    }
+
+    pub fn list(blocks: []const SamplingMessageContentBlock) SamplingContent {
+        return .{ .many = blocks };
+    }
+
+    pub fn count(self: SamplingContent) usize {
+        return switch (self) {
+            .single => 1,
+            .many => self.many.len,
+        };
+    }
+
+    /// Block at `index`, or null when out of range.
+    pub fn get(self: SamplingContent, index: usize) ?SamplingMessageContentBlock {
+        return switch (self) {
+            .single => if (index == 0) self.single else null,
+            .many => if (index < self.many.len) self.many[index] else null,
+        };
+    }
+};
+
+/// Violations of the constraints the spec places on sampling messages.
+pub const SamplingValidationError = error{
+    /// A user message carried tool results mixed with other content types.
+    ToolResultMessageMixedContent,
+    /// A tool use was not answered by a matching tool result.
+    UnmatchedToolUse,
+    /// A tool result referenced an id that no tool use produced.
+    UnmatchedToolResult,
+    OutOfMemory,
+};
+
+/// True when at least one block is a tool use.
+pub fn hasToolUse(content: SamplingContent) bool {
+    var i: usize = 0;
+    while (i < content.count()) : (i += 1) {
+        switch (content.get(i).?) {
+            .tool_use => return true,
+            else => {},
+        }
+    }
+    return false;
+}
+
+/// A user message that contains tool results MUST contain only tool results,
+/// so that provider APIs using a dedicated role for results stay compatible.
+pub fn isToolResultOnly(content: SamplingContent) bool {
+    const total = content.count();
+    if (total == 0) return false;
+    var i: usize = 0;
+    while (i < total) : (i += 1) {
+        switch (content.get(i).?) {
+            .tool_result => {},
+            else => return false,
+        }
+    }
+    return true;
+}
+
+/// True when at least one block is a tool result.
+pub fn hasToolResult(content: SamplingContent) bool {
+    var i: usize = 0;
+    while (i < content.count()) : (i += 1) {
+        switch (content.get(i).?) {
+            .tool_result => return true,
+            else => {},
+        }
+    }
+    return false;
+}
+
+/// True when the first block is a tool result, i.e. the message is a
+/// tool-result message.
+pub fn isToolResultMessage(content: SamplingContent) bool {
+    if (content.count() == 0) return false;
+    return switch (content.get(0).?) {
+        .tool_result => true,
+        else => false,
+    };
+}
+
+/// Validates the message-level rules for sampling with tools:
+///
+///  * a user message carrying tool results contains only tool results;
+///  * every tool use is answered by a tool result with a matching `toolUseId`
+///    before any later message.
+pub fn validateSamplingMessages(messages: []const SamplingMessage) SamplingValidationError!void {
+    var pending = std.ArrayList([]const u8).empty;
+    defer pending.deinit(std.heap.page_allocator);
+
+    for (messages) |msg| {
+        switch (msg.role) {
+            .assistant => {
+                if (pending.items.len != 0) return error.UnmatchedToolUse;
+
+                var i: usize = 0;
+                while (i < msg.content.count()) : (i += 1) {
+                    switch (msg.content.get(i).?) {
+                        .tool_use => |use| {
+                            pending.append(std.heap.page_allocator, use.id) catch
+                                return error.OutOfMemory;
+                        },
+                        else => {},
+                    }
+                }
+            },
+            .user => {
+                if (!hasToolResult(msg.content)) continue;
+                if (!isToolResultOnly(msg.content)) return error.ToolResultMessageMixedContent;
+
+                var i: usize = 0;
+                while (i < msg.content.count()) : (i += 1) {
+                    const result = switch (msg.content.get(i).?) {
+                        .tool_result => |r| r,
+                        else => unreachable,
+                    };
+                    var matched: ?usize = null;
+                    for (pending.items, 0..) |id, k| {
+                        if (std.mem.eql(u8, id, result.toolUseId)) {
+                            matched = k;
+                            break;
+                        }
+                    }
+                    const idx = matched orelse return error.UnmatchedToolResult;
+                    _ = pending.swapRemove(idx);
+                }
+            },
+        }
+    }
+
+    if (pending.items.len != 0) return error.UnmatchedToolUse;
+}
 
 /// Content of a text resource.
 pub const TextResourceContents = struct {
@@ -401,20 +605,70 @@ pub const ToolDefinition = struct {
 };
 
 /// JSON Schema for tool input parameters.
+///
+/// SEP-2100 makes this a full JSON Schema 2020-12 document, so keywords
+/// beyond the typed convenience fields below are legal. Anything this struct
+/// cannot express (`$ref`, `$defs`, `allOf`/`anyOf`/`oneOf`,
+/// `additionalProperties`, `patternProperties`, bounds, ...) must be supplied
+/// through `raw`; the server emits `raw` verbatim and then overlays the typed
+/// fields, so no keyword is ever silently dropped.
 pub const InputSchema = struct {
     @"$schema": ?[]const u8 = null,
     type: []const u8 = "object",
     properties: ?std.json.Value = null,
     required: ?[]const []const u8 = null,
     description: ?[]const u8 = null,
+
+    /// The complete schema document, used as the base for serialisation.
+    raw: ?std.json.Value = null,
+
+    /// Wraps a raw JSON Schema 2020-12 document. Typed fields are also
+    /// populated where they can be read without allocating, so callers can
+    /// inspect `type`/`properties` directly while the untouched document
+    /// (including every unsupported keyword) is preserved for the wire.
+    pub fn fromJson(value: std.json.Value) InputSchema {
+        var out: InputSchema = .{ .raw = value };
+        const obj = switch (value) {
+            .object => |o| o,
+            else => return out,
+        };
+        if (obj.get("type")) |t| {
+            if (t == .string) out.type = t.string;
+        }
+        if (obj.get("$schema")) |s| {
+            if (s == .string) out.@"$schema" = s.string;
+        }
+        if (obj.get("description")) |d| {
+            if (d == .string) out.description = d.string;
+        }
+        if (obj.get("properties")) |p| out.properties = p;
+        return out;
+    }
 };
 
-/// JSON Schema for tool output.
+/// JSON Schema for tool output. Same `raw` passthrough rules as `InputSchema`.
 pub const OutputSchema = struct {
     @"$schema": ?[]const u8 = null,
     type: []const u8 = "object",
     properties: ?std.json.Value = null,
     required: ?[]const []const u8 = null,
+    raw: ?std.json.Value = null,
+
+    pub fn fromJson(value: std.json.Value) OutputSchema {
+        var out: OutputSchema = .{ .raw = value };
+        const obj = switch (value) {
+            .object => |o| o,
+            else => return out,
+        };
+        if (obj.get("type")) |t| {
+            if (t == .string) out.type = t.string;
+        }
+        if (obj.get("$schema")) |s| {
+            if (s == .string) out.@"$schema" = s.string;
+        }
+        if (obj.get("properties")) |p| out.properties = p;
+        return out;
+    }
 };
 
 /// Execution-related properties for a tool.
@@ -463,9 +717,12 @@ pub const PromptMessage = struct {
 };
 
 /// Message issued to or received from an LLM API.
+///
+/// `content` is either a single block or an array of blocks; see
+/// `SamplingContent`.
 pub const SamplingMessage = struct {
     role: Role,
-    content: SamplingMessageContentBlock,
+    content: SamplingContent,
     _meta: ?std.json.Value = null,
 };
 
@@ -543,10 +800,28 @@ pub const Task = struct {
     createdAt: []const u8,
     /// ISO 8601 timestamp when the task was last updated.
     lastUpdatedAt: []const u8,
-    /// Actual retention duration from creation in milliseconds, null for unlimited.
-    ttl: ?i64 = null,
-    /// Suggested polling interval in milliseconds.
-    pollInterval: ?i64 = null,
+    /// Actual retention duration from creation in milliseconds, null for
+    /// unlimited. The server may discard the task once this elapses, and the
+    /// value MAY change over the task's lifetime.
+    ttlMs: ?i64 = null,
+    /// Suggested polling interval in milliseconds. Clients SHOULD honor it.
+    pollIntervalMs: ?i64 = null,
+    /// Failure detail, present when `status` is `failed`.
+    @"error": ?TaskError = null,
+    /// Outstanding server-to-client requests, present when `status` is
+    /// `input_required`. The client answers them through `tasks/update`.
+    inputRequests: ?InputRequests = null,
+    /// Opaque state echoed back on the next `tasks/update`, so the server can
+    /// resume the round that is blocked on client input.
+    requestState: ?[]const u8 = null,
+};
+
+/// Why a task failed. `message` is human-readable and always present in
+/// results emitted by this library.
+pub const TaskError = struct {
+    code: ?i64 = null,
+    message: ?[]const u8 = null,
+    data: ?std.json.Value = null,
 };
 
 /// Metadata for augmenting a request with task execution.
@@ -645,49 +920,81 @@ pub const ResultType = enum {
     }
 };
 
-/// Cache scope for list/read results.
+/// Cache scope for list/read results (MCP 2026-07-28 caching).
+/// `public` results contain no user-specific data and may be shared between
+/// callers; `private` results are bound to one authorization context and MUST
+/// NOT be served from a cache shared across callers.
 pub const CacheScope = enum {
-    /// No caching permitted.
-    none,
-    /// Cache for the session lifetime.
-    session,
+    /// The response contains no user-specific data; any cache may store it.
+    public,
+    /// The response contains user-specific data; caches must not be shared
+    /// across authorization contexts.
+    private,
 
     pub fn toString(self: CacheScope) []const u8 {
         return @tagName(self);
     }
 };
 
-/// An input request from the server when resultType is "input_required" (MRTR).
+/// A single server-to-client request carried inside `InputRequests`.
+///
+/// This is a JSON-RPC request object *without* an `id`, one of
+/// `ElicitRequest`, `CreateMessageRequest` or `ListRootsRequest`.
 pub const InputRequest = struct {
-    /// A unique identifier for this input request.
-    requestId: []const u8,
-    /// The type of input requested (e.g. "sampling", "elicitation", "roots").
-    requestType: []const u8,
-    /// Human-readable message describing what input is needed.
-    message: []const u8,
-    /// Optional parameters for the input request (e.g. schema for elicitation).
+    /// The MCP method the client must service (e.g. "elicitation/create").
+    method: []const u8,
+    /// Method parameters.
     params: ?std.json.Value = null,
 };
 
-/// An input response from the client providing the requested input.
-pub const InputResponse = struct {
-    /// The ID of the input request this responds to.
-    requestId: []const u8,
-    /// The input content provided by the client.
-    content: std.json.Value,
+/// `InputRequests`: map of server-assigned identifiers to request objects.
+///
+/// Keys are server assigned and MUST be unique within the scope of one request.
+pub const InputRequests = std.json.ObjectMap;
+
+/// `InputResponses`: map of the same identifiers to the client's results
+/// (`ElicitResult`, `CreateMessageResult`, `ListRootsResult`, ...).
+pub const InputResponses = std.json.ObjectMap;
+
+/// Returned when a request cannot complete until the client supplies more
+/// input. See "Multi Round-Trip Requests" in the MCP 2026-07-28 spec.
+///
+/// Servers MAY emit this for `tools/call`, `resources/read` and `prompts/get`
+/// only, and MUST include at least one of `inputRequests` or `requestState`.
+pub const InputRequiredResult = struct {
+    /// Requests the client must fulfill before retrying the original request.
+    inputRequests: ?InputRequests = null,
+    /// Opaque server state. Clients MUST echo it back verbatim on retry and
+    /// MUST NOT inspect, parse, or modify it.
+    requestState: ?[]const u8 = null,
 };
 
-/// Subscription filter for subscriptions/listen.
+/// Notification filter for `subscriptions/listen`.
+///
+/// Every field is optional; omitting a field means the client did not
+/// subscribe to that notification type.
 pub const SubscriptionFilter = struct {
-    /// Glob pattern for matching URIs.
-    uriPattern: ?[]const u8 = null,
-    /// MIME types to filter by.
-    mimeTypes: ?[]const []const u8 = null,
+    /// Receive `notifications/tools/list_changed`.
+    toolsListChanged: bool = false,
+    /// Receive `notifications/prompts/list_changed`.
+    promptsListChanged: bool = false,
+    /// Receive `notifications/resources/list_changed`.
+    resourcesListChanged: bool = false,
+    /// Receive `notifications/resources/updated` for these resource URIs.
+    resourceSubscriptions: ?[]const []const u8 = null,
+    /// Receive `notifications/tasks` for these task ids.
+    taskIds: ?[]const []const u8 = null,
 };
 
 /// Base result type. All results can carry _meta.
 pub const Result = struct {
     _meta: ?std.json.Value = null,
+};
+
+/// MCP Apps UI metadata (`io.modelcontextprotocol/ui`).
+pub const ToolUi = struct {
+    resourceUri: []const u8,
+    visibility: ?[]const []const u8 = null,
 };
 
 test "RequestId equality" {

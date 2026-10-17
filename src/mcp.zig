@@ -39,7 +39,7 @@
 
 const std = @import("std");
 
-/// Report and version utilities
+/// Error reporting utilities
 pub const report = @import("report.zig");
 pub const version_info = @import("version.zig");
 
@@ -50,20 +50,21 @@ pub const ISSUES_URL = report.ISSUES_URL;
 pub const VERSION = version_info.version;
 
 /// Prints an error message with instructions for reporting bugs.
-pub fn reportError(err: anyerror) void {
-    report.reportError(err);
-}
+pub const reportError = report.reportError;
 
 /// Prints a custom error message with instructions for reporting bugs.
-pub fn reportErrorMessage(message: []const u8) void {
-    report.reportErrorMessage(message);
-}
+pub const reportErrorMessage = report.reportErrorMessage;
 
 // Protocol types and JSON-RPC implementation
 pub const protocol = @import("protocol/protocol.zig");
 pub const types = @import("protocol/types.zig");
 pub const jsonrpc = @import("protocol/jsonrpc.zig");
 pub const schema = @import("protocol/schema.zig");
+pub const auth = @import("protocol/auth.zig");
+
+// MCP Apps extension constants
+pub const EXTENSION_UI = protocol.EXTENSION_UI;
+pub const MIME_TYPE_MCP_APP = protocol.MIME_TYPE_MCP_APP;
 
 // Transport layer implementations
 pub const transport = @import("transport/transport.zig");
@@ -75,14 +76,21 @@ pub const Transport = transport.Transport;
 pub const server = @import("server/server.zig");
 pub const Server = server.Server;
 pub const ServerConfig = server.ServerConfig;
+// Re-exported so the Streamable HTTP conformance tests in this file are
+// collected by `zig build test`; a privately imported module's tests are not.
+pub const http_rules = @import("server/http_rules.zig");
 
 pub const tools = @import("server/tools.zig");
 pub const Tool = tools.Tool;
 pub const ToolBuilder = tools.ToolBuilder;
 pub const ToolResult = tools.ToolResult;
+pub const ToolUi = types.ToolUi;
+pub const uiResult = tools.uiResult;
 
 pub const resources = @import("server/resources.zig");
 pub const Resource = resources.Resource;
+pub const ResourceBuilder = resources.ResourceBuilder;
+pub const ResourceContent = resources.ResourceContent;
 pub const ResourceTemplate = resources.ResourceTemplate;
 
 pub const prompts = @import("server/prompts.zig");
@@ -99,7 +107,9 @@ pub const sampling = @import("client/sampling.zig");
 
 // MRTR types (2026-07-28)
 pub const InputRequest = @import("protocol/types.zig").InputRequest;
-pub const InputResponse = @import("protocol/types.zig").InputResponse;
+pub const InputRequests = @import("protocol/types.zig").InputRequests;
+pub const InputResponses = @import("protocol/types.zig").InputResponses;
+pub const InputRequiredResult = @import("protocol/types.zig").InputRequiredResult;
 pub const ResultType = @import("protocol/types.zig").ResultType;
 pub const SubscriptionFilter = @import("protocol/types.zig").SubscriptionFilter;
 pub const CacheScope = @import("protocol/types.zig").CacheScope;
@@ -109,7 +119,6 @@ pub const DiscoverResult = @import("protocol/protocol.zig").DiscoverResult;
 
 // Utilities
 pub const utils = @import("utils/mod.zig");
-pub const errors = @import("utils/errors.zig");
 pub const logging = @import("utils/logging.zig");
 pub const progress = @import("utils/progress.zig");
 pub const middleware = @import("utils/middleware.zig");
@@ -119,6 +128,7 @@ pub const RateLimiter = middleware.RateLimiter;
 pub const RequestValidator = middleware.RequestValidator;
 pub const BatchRequest = middleware.BatchRequest;
 pub const LoggingContext = middleware.LoggingContext;
+pub const CancellationToken = utils.cancellation.CancellationToken;
 
 test {
     std.testing.refAllDecls(@This());

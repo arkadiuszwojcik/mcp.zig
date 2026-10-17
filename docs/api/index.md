@@ -36,7 +36,7 @@ const jsonrpc = mcp.jsonrpc;
 
 ## Versions
 
-- Library version: `0.0.8`
+- Library version: `0.0.9`
 - Protocol version: `2026-07-28`
 
 ```zig
@@ -46,5 +46,5 @@ const protocol_version = mcp.protocol.PROTOCOL_VERSION;
 ## Notes
 
 - Server tools/resources/prompts capabilities are enabled by registration (`addTool`, `addResource`, `addPrompt`).
-- HTTP server mode accepts JSON-RPC POST requests on `/`.
+- HTTP server mode accepts JSON-RPC POST requests on `/mcp`.
 - Client APIs are currently request-oriented (`!void`) and do not block-wait for typed responses.
